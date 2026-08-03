@@ -2,7 +2,11 @@
 
 $mutex = New-Object System.Threading.Mutex($false, 'Global\DailyTasksApp_Hebrew')
 if (-not $mutex.WaitOne(0, $false)) {
-    [System.Windows.MessageBox]::Show('התוכנה כבר פועלת. בדקו את מגש המערכת.', 'משימות יומיות')
+    try {
+        $ev = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Global\DailyTasksApp_Show')
+        [void]$ev.Set()
+        $ev.Dispose()
+    } catch {}
     exit
 }
 
@@ -16,6 +20,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
+$script:SoundPlayers = New-Object System.Collections.ArrayList
 
 function Get-TodayStr {
     (Get-Date).ToString('yyyy-MM-dd')
@@ -126,10 +131,18 @@ function Ensure-SuccessSound {
     Write-Chime (Join-Path $PSScriptRoot 'success.wav') @(523.25, 659.25, 783.99, 1046.5) @(0.09, 0.09, 0.09, 0.35)
 }
 
+function Play-WavFile([string]$path) {
+    try {
+        $p = New-Object System.Media.SoundPlayer($path)
+        [void]$script:SoundPlayers.Add($p)
+        $p.Play()
+    } catch {}
+}
+
 function Play-TaskSound {
     $wav = Join-Path $PSScriptRoot 'sound.wav'
     if (Test-Path -LiteralPath $wav) {
-        try { $pl = New-Object System.Media.SoundPlayer($wav); $pl.Play() } catch { try { [System.Media.SystemSounds]::Exclamation.Play() } catch {} }
+        Play-WavFile $wav
     } else {
         try { [System.Media.SystemSounds]::Exclamation.Play() } catch {}
     }
@@ -137,9 +150,7 @@ function Play-TaskSound {
 
 function Play-SuccessSound {
     $wav = Join-Path $PSScriptRoot 'success.wav'
-    if (Test-Path -LiteralPath $wav) {
-        try { $pl = New-Object System.Media.SoundPlayer($wav); $pl.Play() } catch {}
-    }
+    if (Test-Path -LiteralPath $wav) { Play-WavFile $wav }
 }
 
 function Get-Streak {
@@ -304,8 +315,8 @@ function Handle-ListClick($s, $e) {
     switch ($src.Name) {
         'EditCardBtn' { Show-TaskDialog $t }
         'DelCardBtn' {
-            $r = [System.Windows.MessageBox]::Show("למחוק את המשימה ?$($t.Title)?", 'מחיקת משימה', 'YesNo', 'Question')
-            if ($r -eq 'Yes') {
+            $r = Show-MessageDialog "למחוק את המשימה '$($t.Title)'?" 'מחיקת משימה' -Confirm
+            if ($r -eq 'yes') {
                 $script:Tasks = @($script:Tasks | Where-Object { $_.Id -ne $t.Id })
                 Save-Tasks
                 Refresh-List
@@ -612,7 +623,7 @@ function Show-TaskDialog($existing) {
     $saveBtn.Add_Click({
         $timeStr = $timeBox.Text.Trim()
         if (-not ($timeStr -match '^\d{1,2}:\d{2}$')) {
-            [System.Windows.MessageBox]::Show('נא להזין שעה בפורמט HH:MM', 'שגיאה')
+            Show-MessageDialog 'נא להזין שעה בפורמט HH:MM' 'שגיאה'
             return
         }
         $titles = @()
@@ -635,13 +646,13 @@ function Show-TaskDialog($existing) {
             }
         }
         if ($titles.Count -eq 0) {
-            [System.Windows.MessageBox]::Show('נא להזין לפחות משימה אחת עם כותרת', 'שגיאה')
+            Show-MessageDialog 'נא להזין לפחות משימה אחת עם כותרת' 'שגיאה'
             return
         }
         if ($repeatBox.SelectedIndex -eq 1) {
             $selected = @($dayChecks | Where-Object { $_.IsChecked -eq $true } | ForEach-Object { [int]$_.Tag })
             if ($selected.Count -eq 0) {
-                [System.Windows.MessageBox]::Show('נא לבחור לפחות יום אחד לחזרה שבועית', 'שגיאה')
+                Show-MessageDialog 'נא לבחור לפחות יום אחד לחזרה שבועית' 'שגיאה'
                 return
             }
         }
@@ -1361,6 +1372,70 @@ function New-SharedStyles {
 '@
 }
 
+function Show-MessageDialog([string]$message, [string]$title, [switch]$Confirm) {
+    $d = New-Object System.Windows.Window
+    $d.Title = $title
+    $d.Width = 380
+    $d.SizeToContent = 'Height'
+    $d.WindowStartupLocation = 'CenterOwner'
+    $d.ResizeMode = 'NoResize'
+    $d.WindowStyle = 'SingleBorderWindow'
+    $d.FlowDirection = 'RightToLeft'
+    $d.Background = Get-Brush '#FFFFFF'
+    $d.FontFamily = New-Object System.Windows.Media.FontFamily('Segoe UI')
+
+    $root = New-Object System.Windows.Controls.StackPanel
+    $root.Margin = New-Object System.Windows.Thickness(24, 22, 24, 20)
+
+    $msg = New-Object System.Windows.Controls.TextBlock
+    $msg.Text = $message
+    $msg.FontSize = 14
+    $msg.Foreground = Get-Brush '#374151'
+    $msg.TextWrapping = 'Wrap'
+    $msg.MaxWidth = 330
+    $root.Children.Add($msg) > $null
+
+    $bar = New-Object System.Windows.Controls.StackPanel
+    $bar.Orientation = 'Horizontal'
+    $bar.HorizontalAlignment = 'Right'
+    $bar.Margin = New-Object System.Windows.Thickness(0, 20, 0, 0)
+
+    if ($Confirm) {
+        $cancelBtn = New-Object System.Windows.Controls.Button
+        $cancelBtn.Content = 'ביטול'
+        $cancelBtn.Width = 92
+        $cancelBtn.Height = 36
+        $cancelBtn.FontSize = 13
+        $cancelBtn.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
+        $cancelBtn.Style = $script:SecondaryBtnStyle
+        $cancelBtn.Add_Click({ $d.Tag = 'no'; $d.Close() })
+        $bar.Children.Add($cancelBtn) > $null
+
+        $okBtn = New-Object System.Windows.Controls.Button
+        $okBtn.Content = 'מחיקה'
+        $okBtn.Width = 92
+        $okBtn.Height = 36
+        $okBtn.FontSize = 13
+        $okBtn.Style = $script:PrimaryBtnStyle
+        $okBtn.Add_Click({ $d.Tag = 'yes'; $d.Close() })
+        $bar.Children.Add($okBtn) > $null
+    } else {
+        $okBtn = New-Object System.Windows.Controls.Button
+        $okBtn.Content = 'אישור'
+        $okBtn.Width = 92
+        $okBtn.Height = 36
+        $okBtn.FontSize = 13
+        $okBtn.Style = $script:PrimaryBtnStyle
+        $okBtn.Add_Click({ $d.Tag = 'ok'; $d.Close() })
+        $bar.Children.Add($okBtn) > $null
+    }
+
+    $root.Children.Add($bar) > $null
+    $d.Content = $root
+    $null = $d.ShowDialog()
+    return $d.Tag
+}
+
 $script:MainXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -1454,24 +1529,23 @@ $script:MainXaml = @'
         <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
 
-      <Grid Grid.Row="0" Margin="18,8,18,6">
+      <Grid Grid.Row="0" Margin="16,6,16,4">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,0">
-          <TextBlock Text="📋" FontSize="18" VerticalAlignment="Center" Margin="0,0,10,0"/>
-          <TextBlock Text="משימות יומיות" FontSize="17" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center"/>
-          <TextBlock x:Name="TopDate" FontSize="12.5" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="12,0,0,0"/>
+          <TextBlock Text="&#x1F4CB;" FontSize="17" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock Text="משימות יומיות" FontSize="16" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
-          <Button x:Name="MinBtn" Content="&#x2013;" Width="36" Height="30" Margin="0,0,6,0" FontSize="14" Style="{StaticResource FilterStyle}" ToolTip="מזעור"/>
-          <Button x:Name="CloseBtn" Content="&#x2715;" Width="36" Height="30" FontSize="12" Foreground="#6B7280" Style="{StaticResource FilterStyle}" ToolTip="סגירה למגש"/>
+          <Button x:Name="MinBtn" Content="&#x2013;" Width="34" Height="30" Margin="0,0,5,0" FontSize="14" Style="{StaticResource FilterStyle}" ToolTip="מזעור"/>
+          <Button x:Name="CloseBtn" Content="&#x2715;" Width="34" Height="30" FontSize="12" Foreground="#6B7280" Style="{StaticResource FilterStyle}" ToolTip="סגירה למגש"/>
         </StackPanel>
       </Grid>
 
-      <Border Grid.Row="1" Margin="14,0,14,12" CornerRadius="16" Padding="22,18">
+      <Border Grid.Row="1" Margin="14,0,14,12" CornerRadius="16" Padding="18,14">
         <Border.Background>
           <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
             <GradientStop Color="#6366F1" Offset="0"/>
@@ -1483,20 +1557,22 @@ $script:MainXaml = @'
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <Grid Grid.Row="0">
+          <TextBlock x:Name="TopDate" Text="" FontSize="12" Foreground="#C7D2FE" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          <Grid Grid.Row="1" Margin="0,6,0,0">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <StackPanel>
-              <TextBlock Text="היום" FontSize="13" Foreground="#C7D2FE" FontWeight="SemiBold"/>
-              <TextBlock x:Name="HeroText" Text="0 מתוך 0 הושלמו" FontSize="26" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,2,0,0"/>
+              <TextBlock Text="היום" FontSize="12.5" Foreground="#C7D2FE" FontWeight="SemiBold"/>
+              <TextBlock x:Name="HeroText" Text="0 מתוך 0 הושלמו" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
               <TextBlock x:Name="HeroStreak" Text="" FontSize="12" Foreground="#C7D2FE" Margin="0,3,0,0"/>
             </StackPanel>
-            <TextBlock x:Name="HeroPct" Grid.Column="1" Text="0%" FontSize="44" FontWeight="ExtraBold" Foreground="#FFFFFF" VerticalAlignment="Center" Opacity="0.92"/>
+            <TextBlock x:Name="HeroPct" Grid.Column="1" Text="0%" FontSize="36" FontWeight="ExtraBold" Foreground="#FFFFFF" VerticalAlignment="Center" Opacity="0.92"/>
           </Grid>
-          <Grid Grid.Row="1" Margin="0,14,0,0">
+          <Grid Grid.Row="2" Margin="0,12,0,0">
             <Border Background="#40FFFFFF" CornerRadius="6" Height="12"/>
             <ProgressBar x:Name="HeroBar" Height="12" Minimum="0" Maximum="100" Value="0">
               <ProgressBar.Template>
@@ -1509,7 +1585,7 @@ $script:MainXaml = @'
               </ProgressBar.Template>
             </ProgressBar>
           </Grid>
-          <TextBlock x:Name="HeroHint" Grid.Row="2" Text="הוסיפו משימה ותתחילו לתכנן את היום" FontSize="12.5" Foreground="#E0E7FF" Margin="0,10,0,0"/>
+          <TextBlock x:Name="HeroHint" Grid.Row="3" Text="הוסיפו משימה ותתחילו לתכנן את היום" FontSize="12.5" Foreground="#E0E7FF" Margin="0,9,0,0" TextWrapping="Wrap"/>
         </Grid>
       </Border>
 
@@ -1559,19 +1635,19 @@ $script:MainXaml = @'
         </Grid>
       </Border>
 
-      <Grid Grid.Row="3" Margin="14,0,14,10">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <TextBlock Text="רשימת משימות" FontSize="14" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center"/>
-          <TextBlock x:Name="FilterSummary" FontSize="12" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="10,0,0,0"/>
-        </StackPanel>
-        <Button x:Name="FiltToday" Grid.Column="1" Content="היום" Margin="0,0,8,0" Style="{StaticResource FilterStyle}"/>
-        <Button x:Name="FiltAll" Grid.Column="2" Content="הכל" Style="{StaticResource FilterStyle}"/>
-      </Grid>
+      <StackPanel Grid.Row="3" Margin="14,0,14,10">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="רשימת משימות" FontSize="14" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          <Button x:Name="FiltToday" Grid.Column="1" Content="היום" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
+          <Button x:Name="FiltAll" Grid.Column="2" Content="הכל" Style="{StaticResource FilterStyle}"/>
+        </Grid>
+        <TextBlock x:Name="FilterSummary" FontSize="11.5" Foreground="#9CA3AF" Margin="2,5,0,0"/>
+      </StackPanel>
 
       <Grid Grid.Row="4" Margin="14,0,14,10">
         <ListBox x:Name="TaskList" Background="Transparent" BorderThickness="0"
@@ -1598,7 +1674,7 @@ $script:MainXaml = @'
           </ListBox.ItemContainerStyle>
           <ListBox.ItemTemplate>
             <DataTemplate>
-              <Border CornerRadius="12" Background="#FFFFFF" BorderBrush="#E5E7EB" BorderThickness="1" Padding="12,10">
+              <Border CornerRadius="12" Background="#FFFFFF" BorderBrush="#E5E7EB" BorderThickness="1" Padding="10,9">
                 <Border.Effect>
                   <DropShadowEffect BlurRadius="12" ShadowDepth="2" Opacity="0.07" Color="#000000"/>
                 </Border.Effect>
@@ -1609,10 +1685,10 @@ $script:MainXaml = @'
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                   </Grid.ColumnDefinitions>
-                  <CheckBox IsChecked="{Binding IsDone, Mode=OneWay}" Width="24" Height="24" VerticalAlignment="Center" Margin="4,0,12,0"/>
+                  <CheckBox IsChecked="{Binding IsDone, Mode=OneWay}" Width="22" Height="22" VerticalAlignment="Center" Margin="2,0,10,0"/>
                   <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Title}" FontSize="14" FontWeight="SemiBold" Foreground="#111827" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock Text="{Binding Description}" FontSize="12" Foreground="#6B7280" TextTrimming="CharacterEllipsis" Margin="0,2,0,0" Visibility="{Binding DescVisibility}"/>
+                    <TextBlock Text="{Binding Title}" FontSize="13.5" FontWeight="SemiBold" Foreground="#111827" TextWrapping="Wrap"/>
+                    <TextBlock Text="{Binding Description}" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="{Binding DescVisibility}"/>
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                       <Border Background="#EEF2FF" CornerRadius="10" Padding="8,2">
                         <TextBlock Text="{Binding RepeatDisplay}" FontSize="10.5" Foreground="#4F46E5"/>
@@ -1620,13 +1696,13 @@ $script:MainXaml = @'
                       <TextBlock Text="&#x1F514;" FontSize="10.5" Margin="6,1,0,0" Visibility="{Binding BellVisibility}" ToolTip="מפעילה התראה"/>
                     </StackPanel>
                   </StackPanel>
-                  <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="12,0,12,0" HorizontalAlignment="Center">
-                    <TextBlock Text="{Binding TimeDisplay}" FontSize="13.5" FontWeight="Bold" Foreground="{Binding TimeBrush}" HorizontalAlignment="Center"/>
-                    <TextBlock Text="{Binding TimeLeftText}" FontSize="11.5" Foreground="{Binding TimeLeftBrush}" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                  <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="8,0,8,0" HorizontalAlignment="Center">
+                    <TextBlock Text="{Binding TimeDisplay}" FontSize="13" FontWeight="Bold" Foreground="{Binding TimeBrush}" HorizontalAlignment="Center"/>
+                    <TextBlock Text="{Binding TimeLeftText}" FontSize="11" Foreground="{Binding TimeLeftBrush}" HorizontalAlignment="Center" Margin="0,2,0,0"/>
                   </StackPanel>
                   <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="EditCardBtn" Content="&#x270E;" Width="30" Height="30" FontSize="13" Style="{StaticResource IconBtnStyle}" ToolTip="עריכה"/>
-                    <Button x:Name="DelCardBtn" Content="&#x2715;" Width="30" Height="30" FontSize="12" Margin="4,0,0,0" Foreground="#EF4444" Style="{StaticResource IconBtnStyle}" ToolTip="מחיקה"/>
+                    <Button x:Name="EditCardBtn" Content="&#x270E;" Width="28" Height="28" FontSize="12" Style="{StaticResource IconBtnStyle}" ToolTip="עריכה"/>
+                    <Button x:Name="DelCardBtn" Content="&#x2715;" Width="28" Height="28" FontSize="11" Margin="3,0,0,0" Foreground="#EF4444" Style="{StaticResource IconBtnStyle}" ToolTip="מחיקה"/>
                   </StackPanel>
                 </Grid>
               </Border>
@@ -1640,15 +1716,11 @@ $script:MainXaml = @'
         </StackPanel>
       </Grid>
 
-      <Border Grid.Row="5" Margin="14,0,14,10" Padding="4,8,4,2" BorderBrush="#E5E7EB" BorderThickness="0,1,0,0">
-        <Grid>
-          <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="Auto"/>
-          </Grid.ColumnDefinitions>
-          <TextBlock Text="התוכנה ממשיכה לרוץ במגש המערכת - לחיצה על ✕ תסגור אותה למגש" FontSize="11.5" Foreground="#9CA3AF" VerticalAlignment="Center"/>
-          <CheckBox x:Name="AutoStartCheck" Grid.Column="1" Content="הפעלה עם ווינדוס" FontSize="12.5" Foreground="#374151" VerticalAlignment="Center"/>
-        </Grid>
+      <Border Grid.Row="5" Margin="14,0,14,10" Padding="4,8,4,4" BorderBrush="#E5E7EB" BorderThickness="0,1,0,0">
+        <StackPanel>
+          <TextBlock Text="התוכנה רצה במגש המערכת - לחיצה על ✕ סוגרת אותה למגש" FontSize="11" Foreground="#9CA3AF" TextWrapping="Wrap"/>
+          <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right"/>
+        </StackPanel>
       </Border>
     </Grid>
   </Border>
@@ -1679,6 +1751,20 @@ function Create-AppIcon {
 }
 
 function New-WpfIcon {
+    $icoPath = Join-Path $PSScriptRoot 'DailyTasks.ico'
+    if (Test-Path -LiteralPath $icoPath) {
+        try {
+            $fs = [System.IO.File]::OpenRead($icoPath)
+            try {
+                $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create($fs, [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat, [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+                $best = $null
+                foreach ($f in $decoder.Frames) {
+                    if ($null -eq $best -or $f.PixelWidth -gt $best.PixelWidth) { $best = $f }
+                }
+                if ($null -ne $best) { return $best }
+            } finally { $fs.Dispose() }
+        } catch {}
+    }
     $icon = Create-AppIcon
     try {
         $ms = New-Object System.IO.MemoryStream
@@ -1771,7 +1857,7 @@ function Init-App {
 
     $today = Get-Date
     $he = New-Object System.Globalization.CultureInfo('he-IL')
-    $script:TopDate.Text = $today.ToString('dddd, d בMMMM yyyy', $he)
+    $script:TopDate.Text = $today.ToString('dddd, d בMMMM', $he)
 
     $addHandler = [System.Windows.RoutedEventHandler]{ param($s, $e) Handle-ListClick $s $e }
     $script:TaskList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $addHandler)
@@ -1839,6 +1925,16 @@ function Init-App {
     $tickTimer.Interval = [TimeSpan]::FromSeconds(20)
     $tickTimer.Add_Tick({ On-Tick })
     $tickTimer.Start()
+
+    try { $script:ShowEvent = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Global\DailyTasksApp_Show') } catch { $script:ShowEvent = $null }
+    if ($null -ne $script:ShowEvent) {
+        $showTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $showTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+        $showTimer.Add_Tick({
+            if ($script:ShowEvent.WaitOne(0)) { Show-MainWindow }
+        })
+        $showTimer.Start()
+    }
 
     $win.Icon = New-WpfIcon
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea

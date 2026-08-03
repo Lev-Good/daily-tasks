@@ -49,4 +49,7 @@ Write-Host ''
 Write-Host 'ההתקנה הושלמה בהצלחה!'
 Write-Host 'התוכנה הותקנה בתיקייה:' $dest
 Write-Host 'נוצרו קיצורי דרך: שולחן העבודה ותפריט התחל.'
-Write-Host 'ניתן להפעיל את התוכנה עכשיו מהקיצור בדרך.'
+Write-Host 'פותחים את התוכנה...'
+if (Test-Path -LiteralPath $runner) {
+    try { Start-Process -FilePath $runner -WorkingDirectory $dest } catch {}
+}
