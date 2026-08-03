@@ -167,8 +167,15 @@ function Set-AutoStart([bool]$on) {
         if ($on) {
             $ws = New-Object -ComObject WScript.Shell
             $sc = $ws.CreateShortcut($lnk)
-            $sc.TargetPath = 'powershell.exe'
-            $sc.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSScriptRoot + '\DailyTasks.ps1"'
+            $runner = Join-Path $PSScriptRoot 'DailyTasks.exe'
+            if (Test-Path -LiteralPath $runner) {
+                $sc.TargetPath = $runner
+                $sc.Arguments = ''
+                $sc.IconLocation = "$runner,0"
+            } else {
+                $sc.TargetPath = 'powershell.exe'
+                $sc.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSScriptRoot + '\DailyTasks.ps1"'
+            }
             $sc.WorkingDirectory = $PSScriptRoot
             $sc.Description = 'משימות יומיות'
             $sc.Save()
@@ -774,7 +781,7 @@ function Celebrate-Confetti([int]$count, [string]$text, [switch]$Dim) {
             $overlay.Fill = Get-Brush '#000000'
             $overlay.Opacity = 0
             $root.Children.Add($overlay) > $null
-            $dimAnim = New-Object System.Windows.Media.Animation.DoubleAnimation(0, 0.35, [TimeSpan]::FromMilliseconds(250))
+            $dimAnim = New-Object System.Windows.Media.Animation.DoubleAnimation(0, 0.12, [TimeSpan]::FromMilliseconds(250))
             $overlay.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $dimAnim)
         }
 
@@ -871,7 +878,7 @@ function Celebrate-Confetti([int]$count, [string]$text, [switch]$Dim) {
                     $p.Rect.Opacity = [math]::Max(0, $p.Rect.Opacity - 0.06)
                 }
             }
-            if ($st2.Ticks -ge 210) {
+            if ($st2.Ticks -ge 70) {
                 $t.Stop()
                 if (-not $st2.Closed) {
                     $st2.Closed = $true
@@ -968,7 +975,7 @@ function Build-ToastWindow($data) {
         $rb.Cursor = 'Hand'
         $rb.DataContext = [pscustomobject]@{ Id = $row.Id; Title = $row.Title }
         $txt = New-Object System.Windows.Controls.TextBlock
-        $txt.Text = '☑ ' + $row.Title
+        $txt.Text = '☐ ' + $row.Title
         $txt.FontSize = 13
         $txt.FontWeight = 'SemiBold'
         $txt.TextTrimming = 'CharacterEllipsis'
@@ -1359,9 +1366,9 @@ $script:MainXaml = @'
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="משימות יומיות"
-        Width="880" Height="660" MinWidth="780" MinHeight="540"
+        Width="320" Height="640" MinWidth="290" MinHeight="460"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
-        WindowStartupLocation="CenterScreen" ResizeMode="CanResize"
+        WindowStartupLocation="Manual" ResizeMode="CanResize"
         FlowDirection="RightToLeft"
         FontFamily="Segoe UI"
         shell:WindowChrome.WindowChrome="{shell:WindowChrome CaptionHeight=34, ResizeBorderThickness=6, CornerRadius=14, GlassFrameThickness=0, UseAeroCaptionButtons=False}">
@@ -1380,10 +1387,12 @@ $script:MainXaml = @'
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Foreground" Value="#374151"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="#FFFFFF" CornerRadius="8" Padding="14,6">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="14,6">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -1509,29 +1518,44 @@ $script:MainXaml = @'
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
-            <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <TextBox x:Name="QuickBox" FontSize="13" HorizontalAlignment="Stretch">
-            <TextBox.Style>
-              <Style TargetType="TextBox">
-                <Setter Property="FontSize" Value="13"/>
-                <Setter Property="Padding" Value="10,7"/>
-                <Setter Property="BorderBrush" Value="#D1D5DB"/>
-                <Setter Property="VerticalContentAlignment" Value="Center"/>
-              </Style>
-            </TextBox.Style>
-          </TextBox>
-          <TextBox x:Name="SearchBox" Grid.Column="1" Width="170" Margin="10,0,0,0">
-            <TextBox.Style>
-              <Style TargetType="TextBox">
-                <Setter Property="FontSize" Value="13"/>
-                <Setter Property="Padding" Value="10,7"/>
-                <Setter Property="BorderBrush" Value="#D1D5DB"/>
-                <Setter Property="VerticalContentAlignment" Value="Center"/>
-              </Style>
-            </TextBox.Style>
-          </TextBox>
-          <Button x:Name="AddBtn" Grid.Column="2" Content="+ משימה" Width="110" Height="34" Margin="10,0,0,0" Style="{StaticResource PrimaryBtnStyle}" />
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Grid>
+              <TextBlock x:Name="QuickHint" Text="הוספה מהירה: כתבו משימה ו-Enter..." FontSize="13" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False"/>
+              <TextBox x:Name="QuickBox" FontSize="13" HorizontalAlignment="Stretch" Background="Transparent">
+                <TextBox.Style>
+                  <Style TargetType="TextBox">
+                    <Setter Property="FontSize" Value="13"/>
+                    <Setter Property="Padding" Value="10,7"/>
+                    <Setter Property="BorderBrush" Value="#D1D5DB"/>
+                    <Setter Property="VerticalContentAlignment" Value="Center"/>
+                  </Style>
+                </TextBox.Style>
+              </TextBox>
+            </Grid>
+            <Button x:Name="AddBtn" Grid.Column="1" Content="משימה מפורטת" Width="120" Height="34" Margin="10,0,0,0" Style="{StaticResource PrimaryBtnStyle}" ToolTip="פתיחת חלון הוספה/עריכה מפורטת של משימה"/>
+          </Grid>
+          <Grid Grid.Row="1" Margin="0,8,0,0">
+            <TextBlock x:Name="SearchHint" Text="חיפוש משימות..." FontSize="13" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False"/>
+            <TextBox x:Name="SearchBox" FontSize="13" HorizontalAlignment="Stretch" Background="Transparent">
+              <TextBox.Style>
+                <Style TargetType="TextBox">
+                  <Setter Property="FontSize" Value="13"/>
+                  <Setter Property="Padding" Value="10,7"/>
+                  <Setter Property="BorderBrush" Value="#D1D5DB"/>
+                  <Setter Property="VerticalContentAlignment" Value="Center"/>
+                </Style>
+              </TextBox.Style>
+            </TextBox>
+          </Grid>
         </Grid>
       </Border>
 
@@ -1654,6 +1678,19 @@ function Create-AppIcon {
     return $icon
 }
 
+function New-WpfIcon {
+    $icon = Create-AppIcon
+    try {
+        $ms = New-Object System.IO.MemoryStream
+        $icon.Save($ms)
+        $ms.Position = 0
+        $bmp = [System.Windows.Media.Imaging.BitmapFrame]::Create($ms, [System.Windows.Media.Imaging.BitmapCreateOptions]::None, [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+        $ms.Dispose()
+        $icon.Dispose()
+        return $bmp
+    } catch { return $null }
+}
+
 function Show-MainWindow {
     $script:Window.Show()
     $script:Window.Activate()
@@ -1727,11 +1764,14 @@ function Init-App {
     $closeBtn = $win.FindName('CloseBtn')
 
     $script:SearchBox.Text = ''
-    $script:SearchBox.ToolTip = 'חיפוש משימות'
-    $script:QuickBox.ToolTip = 'כתבו משימה, אופציונלי עם שעה (לדוגמה: שיחת טלפון 09:30)'
+    $script:SearchBox.ToolTip = 'חיפוש בין המשימות לפי שם או תיאור'
+    $script:QuickBox.ToolTip = 'הוספה מהירה: כתבו משימה, אופציונלי עם שעה (לדוגמה: שיחת טלפון 09:30) ולחצו Enter'
+    $script:QuickHint = $win.FindName('QuickHint')
+    $script:SearchHint = $win.FindName('SearchHint')
 
     $today = Get-Date
-    $script:TopDate.Text = $today.ToString('dddd, d בMMMM yyyy')
+    $he = New-Object System.Globalization.CultureInfo('he-IL')
+    $script:TopDate.Text = $today.ToString('dddd, d בMMMM yyyy', $he)
 
     $addHandler = [System.Windows.RoutedEventHandler]{ param($s, $e) Handle-ListClick $s $e }
     $script:TaskList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $addHandler)
@@ -1742,7 +1782,13 @@ function Init-App {
     $script:QuickBox.Add_KeyDown({
         if ($_.Key -eq 'Enter') { $_.Handled = $true; Add-QuickTask }
     })
-    $script:SearchBox.Add_TextChanged({ Refresh-List })
+    $script:SearchBox.Add_TextChanged({
+        $script:SearchHint.Visibility = if ($script:SearchBox.Text.Length -gt 0) { 'Collapsed' } else { 'Visible' }
+        Refresh-List
+    })
+    $script:QuickBox.Add_TextChanged({
+        $script:QuickHint.Visibility = if ($script:QuickBox.Text.Length -gt 0) { 'Collapsed' } else { 'Visible' }
+    })
 
     function Update-FilterButtons {
         $todayOn = ($script:FiltToday.Tag -eq 'on')
@@ -1793,6 +1839,11 @@ function Init-App {
     $tickTimer.Interval = [TimeSpan]::FromSeconds(20)
     $tickTimer.Add_Tick({ On-Tick })
     $tickTimer.Start()
+
+    $win.Icon = New-WpfIcon
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $win.Left = [double]$wa.Left
+    $win.Top = [double]$wa.Bottom - $win.Height
 
     $win.Show()
     $script:App.Run()

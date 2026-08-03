@@ -38,6 +38,8 @@
 | --- | --- |
 | `DailyTasks.ps1` | התוכנה הראשית (PowerShell + WPF) |
 | `DailyTasks.cmd` | קובץ הפעלה פשוט |
+| `DailyTasks.exe` | עטיפת הפעלה (C#) עם אייקון משלו |
+| `DailyTasks.ico` | אייקון התוכנה |
 | `setup.ps1` / `install.cmd` | מתקין לקיצורי דרך והתקנה |
 | `sound.wav` / `success.wav` | צלילי התראות |
 | `tasks.json` | שמירת המשימות (נוצר אוטומטית, לא נכלל במאגר) |

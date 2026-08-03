@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 
 $dest = Join-Path $env:LOCALAPPDATA 'DailyTasks'
-$files = 'DailyTasks.ps1', 'DailyTasks.cmd', 'sound.wav', 'success.wav', 'tasks.json'
+$files = 'DailyTasks.ps1', 'DailyTasks.cmd', 'DailyTasks.exe', 'DailyTasks.ico', 'sound.wav', 'success.wav', 'tasks.json'
 
 Write-Host 'מתקין את משימות יומיות...'
 
@@ -17,8 +17,8 @@ foreach ($f in $files) {
 }
 
 $ws = New-Object -ComObject WScript.Shell
-$lnkTarget = Join-Path $dest 'DailyTasks.ps1'
-$lnkArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $lnkTarget + '"'
+$runner = Join-Path $dest 'DailyTasks.exe'
+$ps1Path = Join-Path $dest 'DailyTasks.ps1'
 
 $desktop = [Environment]::GetFolderPath('Desktop')
 $startMenuDir = Join-Path ([Environment]::GetFolderPath('Programs')) 'משימות יומיות'
@@ -32,8 +32,14 @@ if (Test-Path -LiteralPath $startMenuDir) { $lnkPlaces += $startMenuDir }
 
 foreach ($dir in $lnkPlaces) {
     $sc = $ws.CreateShortcut((Join-Path $dir 'משימות יומיות.lnk'))
-    $sc.TargetPath = 'powershell.exe'
-    $sc.Arguments = $lnkArgs
+    if (Test-Path -LiteralPath $runner) {
+        $sc.TargetPath = $runner
+        $sc.Arguments = ''
+        $sc.IconLocation = "$runner,0"
+    } else {
+        $sc.TargetPath = 'powershell.exe'
+        $sc.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ps1Path + '"'
+    }
     $sc.WorkingDirectory = $dest
     $sc.Description = 'משימות יומיות'
     $sc.Save()
