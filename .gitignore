@@ -1,0 +1,10 @@
+# personal task data - not published
+tasks.json
+
+# build artifacts (published via Releases instead)
+DailyTasks-Setup.exe
+DailyTasks-Setup.zip
+
+# temp / logs
+*.log
+install_error.txt
