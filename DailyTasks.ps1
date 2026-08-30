@@ -1,5 +1,28 @@
 ﻿Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
+# Enable DPI awareness so the WPF window is crisp on high-DPI displays (must run before any window is created)
+try {
+    Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+public static class DailyTasksDpi {
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+}
+"@ -ErrorAction Stop
+    [void][DailyTasksDpi]::SetProcessDPIAware()
+} catch {}
+
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class DailyTasksFullscreen {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+}
+"@ -ErrorAction Stop
+} catch {}
+
 $mutex = New-Object System.Threading.Mutex($false, 'Global\DailyTasksApp_Hebrew')
 if (-not $mutex.WaitOne(0, $false)) {
     try {
@@ -11,15 +34,41 @@ if (-not $mutex.WaitOne(0, $false)) {
 }
 
 $script:DataFile = Join-Path $PSScriptRoot 'tasks.json'
+$script:SettingsFile = Join-Path $PSScriptRoot 'settings.json'
+$script:SoundEnabled = $true
+$script:StartMinimized = $false
+$script:ShowToastsFullscreen = $false
+$script:Filter = 'today'
+$script:MissedShown = $false
 $script:Tasks = @()
 $script:Snoozed = @{}
 $script:OpenToasts = @()
+$script:ToastHover = @{}
+$script:DlgOverlay = $null
+$script:DlgContent = $null
+$script:DlgMsgContent = $null
+$script:DlgMsgWasOpen = $false
+$script:DlgFrame = $null
+$script:DlgResult = $null
+$script:DlgSaveAction = $null
 $script:NotifiedIds = @{}
 $script:NotifiedDate = ''
 $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
+$script:AppVersion = '1.4.0'
+$script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
+$script:UpdateJob = $null
+$script:UpdateTimer = $null
+$script:UpdateChecking = $false
+$script:UpdatePhase = 'idle'
+$script:UpdateMsg = $null
+$script:UpdateDlBtn = $null
+$script:UpdateLaterBtn = $null
+$script:DownloadJob = $null
+$script:DownloadTimer = $null
+$script:DownloadTarget = ''
 $script:SoundPlayers = New-Object System.Collections.ArrayList
 
 function Get-TodayStr {
@@ -34,22 +83,50 @@ function Get-Brush([string]$hex) {
     return New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb($r, $g, $b))
 }
 
+# Minimal error log for diagnostics (capped size)
+function Write-Log([string]$msg) {
+    try {
+        $p = Join-Path $PSScriptRoot 'error.log'
+        [System.IO.File]::AppendAllText($p, (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $msg + [Environment]::NewLine)
+        $fi = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue
+        if ($null -ne $fi -and $fi.Length -gt 262144) {
+            $tail = Get-Content -LiteralPath $p -Tail 400
+            [System.IO.File]::WriteAllLines($p, $tail, (New-Object System.Text.UTF8Encoding($false)))
+        }
+    } catch {}
+}
+
+# Safe time parsing: returns a TimeSpan or $null when the string is invalid (legacy/corrupt data)
+function Get-TimeSpanSafe([string]$s) {
+    $ts = [TimeSpan]::Zero
+    if ([TimeSpan]::TryParse([string]$s, [ref]$ts)) { return $ts }
+    return $null
+}
+
 function Load-Tasks {
     if (Test-Path -LiteralPath $script:DataFile) {
         try {
             $raw = [System.IO.File]::ReadAllText($script:DataFile, [System.Text.Encoding]::UTF8)
-            $script:Tasks = @($raw | ConvertFrom-Json)
-            foreach ($t in $script:Tasks) {
-                $comp = @{}
-                if ($null -ne $t.Completed) {
-                    foreach ($p in $t.Completed.PSObject.Properties) { $comp[$p.Name] = [bool]$p.Value }
+            # Note: ConvertFrom-Json on '[]' returns $null in Windows PowerShell 5.1,
+            # so guard explicitly instead of wrapping the result in @().
+            $parsed = $raw | ConvertFrom-Json
+            if ($null -eq $parsed) {
+                $script:Tasks = @()
+            } else {
+                $script:Tasks = @($parsed)
+                foreach ($t in $script:Tasks) {
+                    $comp = @{}
+                    if ($null -ne $t.Completed) {
+                        foreach ($p in $t.Completed.PSObject.Properties) { $comp[$p.Name] = [bool]$p.Value }
+                    }
+                    $t.Completed = $comp
+                    if (-not $t.PSObject.Properties['RemindBefore']) { $t.RemindBefore = 0 }
+                    if (-not $t.PSObject.Properties['Notify']) { $t.Notify = $true }
+                    if (-not $t.PSObject.Properties['Sound']) { $t.Sound = $true }
                 }
-                $t.Completed = $comp
-                if (-not $t.PSObject.Properties['RemindBefore']) { $t.RemindBefore = 0 }
-                if (-not $t.PSObject.Properties['Notify']) { $t.Notify = $true }
-                if (-not $t.PSObject.Properties['Sound']) { $t.Sound = $true }
             }
         } catch {
+            Write-Log ('Load-Tasks: ' + $_.Exception.Message)
             $script:Tasks = @()
         }
     }
@@ -57,16 +134,29 @@ function Load-Tasks {
 
 function Save-Tasks {
     try {
-        $cutoff = (Get-Date).AddDays(-60).ToString('yyyy-MM-dd')
-        foreach ($t in $script:Tasks) {
-            $keys = @($t.Completed.Keys)
-            foreach ($k in $keys) {
-                if ($k -lt $cutoff) { $t.Completed.Remove($k) }
-            }
-        }
+        # Keep the full completion history so the streak counter is never cut short.
         $json = $script:Tasks | ConvertTo-Json -Depth 8
         [System.IO.File]::WriteAllText($script:DataFile, $json, (New-Object System.Text.UTF8Encoding($false)))
-    } catch {}
+    } catch { Write-Log ('Save-Tasks: ' + $_.Exception.Message) }
+}
+
+function Load-Settings {
+    if (Test-Path -LiteralPath $script:SettingsFile) {
+        try {
+            $s = Get-Content -LiteralPath $script:SettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $s -and $null -ne $s.Sound) { $script:SoundEnabled = [bool]$s.Sound }
+            if ($null -ne $s -and $null -ne $s.StartMinimized) { $script:StartMinimized = [bool]$s.StartMinimized }
+            if ($null -ne $s -and $null -ne $s.ShowToastsFullscreen) { $script:ShowToastsFullscreen = [bool]$s.ShowToastsFullscreen }
+        } catch { Write-Log ('Load-Settings: ' + $_.Exception.Message) }
+    }
+}
+
+function Save-Settings {
+    try {
+        $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen }
+        $json = $s | ConvertTo-Json
+        [System.IO.File]::WriteAllText($script:SettingsFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { Write-Log ('Save-Settings: ' + $_.Exception.Message) }
 }
 
 function Find-TaskById([string]$id) {
@@ -136,6 +226,12 @@ function Play-WavFile([string]$path) {
         $p = New-Object System.Media.SoundPlayer($path)
         [void]$script:SoundPlayers.Add($p)
         $p.Play()
+        # Sounds are short; keep only the most recent players to avoid an unbounded list.
+        while ($script:SoundPlayers.Count -gt 5) {
+            $old = $script:SoundPlayers[0]
+            try { $old.Dispose() } catch {}
+            $script:SoundPlayers.RemoveAt(0)
+        }
     } catch {}
 }
 
@@ -203,6 +299,26 @@ function Test-TodayTask($t) {
     return $true
 }
 
+# Whether a task falls inside the date range of the active filter (Today / Tomorrow / Week / All)
+function Test-InFilter($t, [datetime]$fromD, [datetime]$toD) {
+    if ($t.Repeat -eq 'Daily') { return $true }
+    if ($t.Repeat -eq 'Once') {
+        if (-not $t.Date) { return $false }
+        $d = [datetime]::MinValue
+        if (-not [datetime]::TryParseExact([string]$t.Date, 'yyyy-MM-dd', $null, 'None', [ref]$d)) { return $false }
+        return ($d.Date -ge $fromD -and $d.Date -le $toD)
+    }
+    # Weekly: matches if any day in the range is one of the task's weekdays
+    if ($fromD -eq [datetime]::MinValue) { return $true }
+    $days = @($t.Days)
+    if ($days.Count -eq 0) { return $false }
+    $span = ($toD - $fromD).TotalDays
+    for ($i = 0; $i -le $span; $i++) {
+        if ($days -contains [int]$fromD.AddDays($i).DayOfWeek) { return $true }
+    }
+    return $false
+}
+
 function New-TaskView($t, $today, [bool]$isToday) {
     $letters = 'א','ב','ג','ד','ה','ו','ש'
     switch ($t.Repeat) {
@@ -215,22 +331,27 @@ function New-TaskView($t, $today, [bool]$isToday) {
     if ($isDone) {
         $timeBrush = '#10B981'; $timeLeft = 'הושלם היום'; $timeLeftBrush = '#10B981'
     } elseif ($isToday) {
-        $tgt = [datetime]::Today.Add([TimeSpan]::Parse($t.Time))
-        $diff = $tgt - (Get-Date)
-        if ($diff.TotalSeconds -gt 0 -and $diff.TotalHours -ge 1) {
-            $timeLeft = 'בעוד ' + [math]::Ceiling($diff.TotalHours) + ' שעות'
-            $timeBrush = '#374151'; $timeLeftBrush = '#6B7280'
-        } elseif ($diff.TotalSeconds -gt 0) {
-            $min = [math]::Max(1, [int][math]::Ceiling($diff.TotalMinutes))
-            $timeLeft = 'בעוד ' + $min + ' דקות'
-            $timeBrush = '#374151'; $timeLeftBrush = '#6B7280'
+        $ts = Get-TimeSpanSafe $t.Time
+        if ($null -eq $ts) {
+            $timeLeft = ''; $timeBrush = '#6B7280'; $timeLeftBrush = '#6B7280'
         } else {
-            $timeLeft = 'הגיע הזמן / באיחור'
-            $timeBrush = '#EF4444'; $timeLeftBrush = '#EF4444'
+            $tgt = [datetime]::Today.Add($ts)
+            $diff = $tgt - (Get-Date)
+            if ($diff.TotalSeconds -gt 0 -and $diff.TotalHours -ge 1) {
+                $timeLeft = 'בעוד ' + [math]::Ceiling($diff.TotalHours) + ' שעות'
+                $timeBrush = '#374151'; $timeLeftBrush = '#6B7280'
+            } elseif ($diff.TotalSeconds -gt 0) {
+                $min = [math]::Max(1, [int][math]::Ceiling($diff.TotalMinutes))
+                $timeLeft = 'בעוד ' + $min + ' דקות'
+                $timeBrush = '#374151'; $timeLeftBrush = '#6B7280'
+            } else {
+                $timeLeft = 'הגיע הזמן / באיחור'
+                $timeBrush = '#EF4444'; $timeLeftBrush = '#EF4444'
+            }
         }
     } else {
         $timeLeft = ''
-        $timeBrush = '#9CA3AF'; $timeLeftBrush = '#9CA3AF'
+        $timeBrush = '#6B7280'; $timeLeftBrush = '#6B7280'
     }
     return [pscustomobject]@{
         Id = $t.Id
@@ -248,54 +369,77 @@ function New-TaskView($t, $today, [bool]$isToday) {
     }
 }
 
+function Get-TaskScrollViewer {
+    try { return $script:TaskList.Template.FindName('PART_ScrollViewer', $script:TaskList) } catch { return $null }
+}
+
 function Refresh-List {
     if ($null -eq $script:TaskList) { return }
-    $today = Get-TodayStr
-    $nowDow = [int](Get-Date).DayOfWeek
-    $onlyToday = ($script:FiltToday.Tag -eq 'on')
-    $q = $script:SearchBox.Text.Trim().ToLower()
-    $views = @()
-    $totalToday = 0
-    $doneToday = 0
-    foreach ($t in $script:Tasks) {
-        $isToday = $true
-        if ($t.Repeat -eq 'Once' -and $t.Date -ne $today) { $isToday = $false }
-        elseif ($t.Repeat -eq 'Weekly' -and $t.Days -notcontains $nowDow) { $isToday = $false }
-        if ($isToday) {
-            $totalToday++
-            if ($t.Completed.ContainsKey($today)) { $doneToday++ }
+    try {
+        $today = Get-TodayStr
+        $nowDow = [int](Get-Date).DayOfWeek
+        $todayD = (Get-Date).Date
+        $fromD = $todayD; $toD = $todayD
+        switch ($script:Filter) {
+            'tomorrow' { $fromD = $todayD.AddDays(1); $toD = $fromD }
+            'week' { $toD = $todayD.AddDays(6) }
+            'all' { $fromD = [datetime]::MinValue; $toD = [datetime]::MaxValue }
         }
-        if ($onlyToday -and -not $isToday) { continue }
-        if ($q) {
-            $hay = ($t.Title + ' ' + $t.Description).ToLower()
-            if (-not $hay.Contains($q)) { continue }
+        $q = $script:SearchBox.Text.Trim().ToLower()
+        $sv = Get-TaskScrollViewer
+        $offset = 0.0
+        if ($null -ne $sv) { $offset = $sv.VerticalOffset }
+        $views = @()
+        $totalToday = 0
+        $doneToday = 0
+        $orderIdx = 0
+        foreach ($t in $script:Tasks) {
+            $isToday = $true
+            if ($t.Repeat -eq 'Once' -and $t.Date -ne $today) { $isToday = $false }
+            elseif ($t.Repeat -eq 'Weekly' -and $t.Days -notcontains $nowDow) { $isToday = $false }
+            if ($isToday) {
+                $totalToday++
+                if ($t.Completed.ContainsKey($today)) { $doneToday++ }
+            }
+            if (-not (Test-InFilter $t $fromD $toD)) { continue }
+            if ($q) {
+                $hay = ($t.Title + ' ' + $t.Description).ToLower()
+                if (-not $hay.Contains($q)) { continue }
+            }
+            $v = New-TaskView $t $today $isToday
+            $v | Add-Member -NotePropertyName OrderIndex -NotePropertyValue $orderIdx
+            $views += $v
+            $orderIdx++
         }
-        $views += New-TaskView $t $today $isToday
-    }
-    $views = @($views | Sort-Object -Property @{Expression = { $_.IsDone }; Ascending = $true}, @{Expression = { [TimeSpan]::Parse($_.Time) }; Ascending = $true})
-    $script:TaskList.ItemsSource = [object[]]$views
-    $script:EmptyMsg.Visibility = if ($views.Count -eq 0) { 'Visible' } else { 'Collapsed' }
-    $script:FilterSummary.Text = "$($views.Count) משימות מוצגות"
-    $pct = if ($totalToday -gt 0) { [int](100 * $doneToday / $totalToday) } else { 0 }
-    $script:HeroText.Text = if ($totalToday -gt 0) { "$doneToday מתוך $totalToday הושלמו" } else { 'אין משימות להיום' }
-    $cur = [double]$script:HeroBar.Value
-    if ([math]::Abs($cur - $pct) -gt 0.5) {
-        $anim = New-Object System.Windows.Media.Animation.DoubleAnimation($cur, $pct, [TimeSpan]::FromMilliseconds(700))
-        $ease = New-Object System.Windows.Media.Animation.QuadraticEase
-        $ease.EasingMode = 'EaseOut'
-        $anim.EasingFunction = $ease
-        $script:HeroBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty, $anim)
-    } else {
-        $script:HeroBar.Value = $pct
-    }
-    $script:HeroPct.Text = "$pct%"
-    $streak = Get-Streak
-    $script:HeroStreak.Text = if ($streak -gt 0) { "רצף: $streak ימים" } else { '' }
-    if ($totalToday -eq 0) { $script:HeroHint.Text = 'הוסיפו משימה ותתחילו לתכנן את היום' }
-    elseif ($pct -eq 100) { $script:HeroHint.Text = 'כל המשימות הושלמו - יום מצוין!' }
-    elseif ($pct -ge 50) { $script:HeroHint.Text = 'עבודה טובה - ממשיכים קדימה' }
-    elseif ($doneToday -gt 0) { $script:HeroHint.Text = 'התחלה טובה - ממשיכים' }
-    else { $script:HeroHint.Text = 'מתחילים את היום עם המשימות' }
+        # Done tasks sink to the bottom; within each group the order is the user's manual order (drag to reorder).
+        $views = @($views | Sort-Object -Property @{Expression = { $_.IsDone }; Ascending = $true}, @{Expression = { $_.OrderIndex }; Ascending = $true})
+        $script:TaskList.ItemsSource = [object[]]$views
+        if ($null -ne $sv -and $script:TaskList.Items.Count -gt 0) {
+            $sv.ScrollToVerticalOffset($offset)
+        }
+        $script:EmptyMsg.Visibility = if ($views.Count -eq 0) { 'Visible' } else { 'Collapsed' }
+        $script:FilterSummary.Text = "$($views.Count) משימות מוצגות"
+        $pct = if ($totalToday -gt 0) { [int](100 * $doneToday / $totalToday) } else { 0 }
+        $script:HeroText.Text = if ($totalToday -gt 0) { "$doneToday מתוך $totalToday הושלמו" } else { 'אין משימות להיום' }
+        $cur = [double]$script:HeroBar.Value
+        if ([math]::Abs($cur - $pct) -gt 0.5) {
+            $anim = New-Object System.Windows.Media.Animation.DoubleAnimation($cur, $pct, [TimeSpan]::FromMilliseconds(700))
+            $ease = New-Object System.Windows.Media.Animation.QuadraticEase
+            $ease.EasingMode = 'EaseOut'
+            $anim.EasingFunction = $ease
+            $script:HeroBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty, $anim)
+        } else {
+            $script:HeroBar.Value = $pct
+        }
+        $script:HeroPct.Text = "$pct%"
+        $streak = Get-Streak
+        $script:HeroStreak.Text = if ($streak -gt 0) { "רצף: $streak ימים" } else { '' }
+        if ($totalToday -eq 0) { $script:HeroHint.Text = 'הוסיפו משימה ותתחילו לתכנן את היום' }
+        elseif ($pct -eq 100) { $script:HeroHint.Text = 'כל המשימות הושלמו - יום מצוין!' }
+        elseif ($pct -ge 50) { $script:HeroHint.Text = 'עבודה טובה - ממשיכים קדימה' }
+        elseif ($doneToday -gt 0) { $script:HeroHint.Text = 'התחלה טובה - ממשיכים' }
+        else { $script:HeroHint.Text = 'מתחילים את היום עם המשימות' }
+    } catch { Write-Log ('Refresh-List: ' + $_.Exception.ToString()) }
 }
 
 function Handle-ListClick($s, $e) {
@@ -360,23 +504,19 @@ function Add-DialogRow {
     $row.HorizontalAlignment = 'Stretch'
 
     $titleBox = New-Object System.Windows.Controls.TextBox
-    $titleBox.Width = 290
+    $titleBox.HorizontalAlignment = 'Stretch'
     $titleBox.FontSize = 14
-    $titleBox.Padding = New-Object System.Windows.Thickness(8, 6, 8, 6)
+    $titleBox.Padding = New-Object System.Windows.Thickness(10, 8, 10, 8)
     $titleBox.VerticalContentAlignment = 'Center'
-
-    $descBox = New-Object System.Windows.Controls.TextBox
-    $descBox.Width = 330
-    $descBox.FontSize = 14
-    $descBox.Padding = New-Object System.Windows.Thickness(8, 6, 8, 6)
-    $descBox.VerticalContentAlignment = 'Center'
+    $titleBox.ToolTip = 'שם המשימה'
 
     $removeBtn = New-Object System.Windows.Controls.Button
     $removeBtn.Content = '✕'
-    $removeBtn.Width = 30
-    $removeBtn.Height = 30
-    $removeBtn.FontSize = 12
-    $removeBtn.Margin = New-Object System.Windows.Thickness(4, 0, 0, 0)
+    $removeBtn.Width = 26
+    $removeBtn.Height = 26
+    $removeBtn.FontSize = 11
+    $removeBtn.VerticalAlignment = 'Center'
+    $removeBtn.Margin = New-Object System.Windows.Thickness(6, 0, 0, 0)
     $removeBtn.Style = $script:IconBtnStyle
     $removeBtn.Add_Click({
         $btn = $_.Source
@@ -386,78 +526,48 @@ function Add-DialogRow {
     })
 
     $row.Children.Add($titleBox) > $null
-    $row.Children.Add($descBox) > $null
     $row.Children.Add($removeBtn) > $null
     $rowsPanel.Children.Add($row) > $null
 }
 
 function Show-TaskDialog($existing) {
-    $win = New-Object System.Windows.Window
-    $win.Title = 'משימה יומית'
-    $win.SizeToContent = 'Height'
-    $win.Width = 760
-    $win.WindowStartupLocation = 'CenterOwner'
-    $win.WindowStyle = 'SingleBorderWindow'
-    $win.ResizeMode = 'NoResize'
-    $win.Background = Get-Brush '#FFFFFF'
-    $win.FlowDirection = 'RightToLeft'
-    $win.FontFamily = New-Object System.Windows.Media.FontFamily('Segoe UI')
-    $win.Add_KeyDown({
-        if ($_.Key -eq 'Escape') { $_.Handled = $true; $win.Close() }
-    })
-    $win.Add_KeyDown({
-        if ($_.Key -eq 'Enter' -and ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) {
-            $_.Handled = $true; $win.Tag = 'saved'; $win.DialogResult = $true; $win.Close()
-        }
-    })
+    if ($null -eq $script:DlgContent) { return }
+    $script:DlgContent.Children.Clear()
+    $script:DlgResult = $null
+    $script:DlgSaveAction = $null
 
     $outer = New-Object System.Windows.Controls.StackPanel
-    $outer.Margin = New-Object System.Windows.Thickness(24)
+    $outer.Margin = New-Object System.Windows.Thickness(0)
     $outer.HorizontalAlignment = 'Stretch'
 
     $header = New-Object System.Windows.Controls.TextBlock
     $header.Text = if ($null -eq $existing) { 'משימה חדשה' } else { 'עריכת משימה' }
-    $header.FontSize = 20
+    $header.FontSize = 21
     $header.FontWeight = 'Bold'
     $header.Foreground = Get-Brush '#111827'
     $header.Margin = New-Object System.Windows.Thickness(0, 0, 0, 4)
     $outer.Children.Add($header) > $null
 
     $sub = New-Object System.Windows.Controls.TextBlock
-    $sub.Text = 'ניתן להזין כמה משימות בבת אחת - כולן יתריעו יחד באותו זמן'
+    $sub.Text = 'הגדירו שעה והתראה, והוסיפו כמה משימות באותו זמן במידת הצורך'
     $sub.FontSize = 12
     $sub.Foreground = Get-Brush '#6B7280'
-    $sub.Margin = New-Object System.Windows.Thickness(0, 0, 0, 14)
+    $sub.Margin = New-Object System.Windows.Thickness(0, 0, 0, 18)
     $outer.Children.Add($sub) > $null
 
-    $grid = New-Object System.Windows.Controls.Grid
-    $grid.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
-    $c1 = New-Object System.Windows.Controls.ColumnDefinition
-    $c1.Width = New-Object System.Windows.GridLength(150)
-    $c2 = New-Object System.Windows.Controls.ColumnDefinition
-    $c2.Width = New-Object System.Windows.GridLength(1, 'Star')
-    $grid.ColumnDefinitions.Add($c1) > $null
-    $grid.ColumnDefinitions.Add($c2) > $null
+    $fieldsPanel = New-Object System.Windows.Controls.StackPanel
+    $fieldsPanel.Margin = New-Object System.Windows.Thickness(0, 0, 0, 6)
 
-    function Add-Field([string]$labelText, $control, [int]$rowIdx) {
+    function Add-FieldV([string]$labelText, $control) {
         $lbl = New-Object System.Windows.Controls.TextBlock
         $lbl.Text = $labelText
-        $lbl.FontSize = 14
+        $lbl.FontSize = 13
         $lbl.FontWeight = 'SemiBold'
         $lbl.Foreground = Get-Brush '#374151'
-        $lbl.VerticalAlignment = 'Center'
-        $lbl.Margin = New-Object System.Windows.Thickness(0, 6, 0, 6)
-        [System.Windows.Controls.Grid]::SetRow($lbl, $rowIdx)
-        [System.Windows.Controls.Grid]::SetColumn($lbl, 0)
-        $grid.Children.Add($lbl) > $null
-        $cp = New-Object System.Windows.Controls.StackPanel
-        $cp.Orientation = 'Horizontal'
-        $cp.HorizontalAlignment = 'Stretch'
-        $cp.Margin = New-Object System.Windows.Thickness(0, 4, 0, 4)
-        $cp.Children.Add($control) > $null
-        [System.Windows.Controls.Grid]::SetRow($cp, $rowIdx)
-        [System.Windows.Controls.Grid]::SetColumn($cp, 1)
-        $grid.Children.Add($cp) > $null
+        $lbl.Margin = New-Object System.Windows.Thickness(0, 10, 0, 2)
+        $fieldsPanel.Children.Add($lbl) > $null
+        $fieldsPanel.Children.Add($control) > $null
+        return $lbl
     }
 
     $timeBox = New-Object System.Windows.Controls.TextBox
@@ -482,10 +592,10 @@ function Show-TaskDialog($existing) {
             default { $repeatBox.SelectedIndex = 0 }
         }
     } else {
-        $repeatBox.SelectedIndex = 0
+        $repeatBox.SelectedIndex = 2
     }
 
-    $daysPanel = New-Object System.Windows.Controls.StackPanel
+    $daysPanel = New-Object System.Windows.Controls.WrapPanel
     $daysPanel.Orientation = 'Horizontal'
     $daysPanel.Margin = New-Object System.Windows.Thickness(0, 0, 0, 4)
     $daysPanel.Visibility = if ($repeatBox.SelectedIndex -eq 1) { 'Visible' } else { 'Collapsed' }
@@ -506,30 +616,23 @@ function Show-TaskDialog($existing) {
         $daysPanel.Children.Add($cb) > $null
     }
 
-    $onceDate = New-Object System.Windows.Controls.TextBox
-    $onceDate.Width = 120
-    $onceDate.FontSize = 15
-    $onceDate.Padding = New-Object System.Windows.Thickness(8, 6, 8, 6)
-    $onceDate.VerticalContentAlignment = 'Center'
+    $onceDate = New-Object System.Windows.Controls.DatePicker
+    $onceDate.Width = 150
+    $onceDate.FontSize = 14
+    $onceDate.SelectedDateFormat = 'Short'
     $onceDate.Visibility = if ($repeatBox.SelectedIndex -eq 2) { 'Visible' } else { 'Collapsed' }
     if ($null -ne $existing -and $existing.Repeat -eq 'Once' -and $existing.Date) {
-        $onceDate.Text = $existing.Date
-    } else {
-        $onceDate.Text = (Get-Date).ToString('yyyy-MM-dd')
+        try { $onceDate.SelectedDate = [datetime]::ParseExact([string]$existing.Date, 'yyyy-MM-dd', $null) } catch {}
+    }
+    if ($null -eq $onceDate.SelectedDate) {
+        $onceDate.SelectedDate = (Get-Date).Date
     }
 
     $notifyCheck = New-Object System.Windows.Controls.CheckBox
-    $notifyCheck.Content = 'התראה וצליל'
+    $notifyCheck.Content = 'התראה'
     $notifyCheck.FontSize = 14
     $notifyCheck.IsChecked = $true
     if ($null -ne $existing) { $notifyCheck.IsChecked = $existing.Notify }
-
-    $soundCheck = New-Object System.Windows.Controls.CheckBox
-    $soundCheck.Content = 'צליל'
-    $soundCheck.FontSize = 14
-    $soundCheck.Margin = New-Object System.Windows.Thickness(20, 0, 0, 0)
-    $soundCheck.IsChecked = $true
-    if ($null -ne $existing) { $soundCheck.IsChecked = $existing.Sound }
 
     $remindBox = New-Object System.Windows.Controls.ComboBox
     $remindBox.Width = 140
@@ -549,33 +652,51 @@ function Show-TaskDialog($existing) {
         }
     }
 
-    $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) > $null
-    Add-Field 'שעה' $timeBox 0
+    Add-FieldV 'שעה' $timeBox
 
-    $notifyWrap = New-Object System.Windows.Controls.StackPanel
-    $notifyWrap.Orientation = 'Horizontal'
-    $notifyWrap.Children.Add($notifyCheck) > $null
-    $notifyWrap.Children.Add($soundCheck) > $null
+    Add-FieldV 'התראה' $notifyCheck
 
-    $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) > $null
-    Add-Field 'התראה' $notifyWrap 1
+    Add-FieldV 'תזכורת' $remindBox
 
-    $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) > $null
-    Add-Field 'תזכורת' $remindBox 2
+    Add-FieldV 'חזרה' $repeatBox
 
-    $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) > $null
-    Add-Field 'חזרה' $repeatBox 3
+    $daysLabel = Add-FieldV 'ימים' $daysPanel
 
-    $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) > $null
-    Add-Field 'ימים' $daysPanel 4
+    $dateLabel = Add-FieldV 'תאריך' $onceDate
 
-    $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) > $null
-    Add-Field 'תאריך' $onceDate 5
+    function Update-RepeatRows {
+        $daysPanel.Visibility = 'Collapsed'
+        $onceDate.Visibility = 'Collapsed'
+        $daysLabel.Visibility = 'Collapsed'
+        $dateLabel.Visibility = 'Collapsed'
+        switch ($repeatBox.SelectedIndex) {
+            1 { $daysPanel.Visibility = 'Visible'; $daysLabel.Visibility = 'Visible' }
+            2 { $onceDate.Visibility = 'Visible'; $dateLabel.Visibility = 'Visible' }
+        }
+    }
+    Update-RepeatRows
+    $repeatBox.Add_SelectionChanged({ Update-RepeatRows })
 
-    $outer.Children.Add($grid) > $null
+    $outer.Children.Add($fieldsPanel) > $null
+
+    $descLbl = New-Object System.Windows.Controls.TextBlock
+    $descLbl.Text = 'תיאור (אופציונלי)'
+    $descLbl.FontSize = 13
+    $descLbl.FontWeight = 'SemiBold'
+    $descLbl.Foreground = Get-Brush '#374151'
+    $descLbl.Margin = New-Object System.Windows.Thickness(0, 10, 0, 2)
+    $outer.Children.Add($descLbl) > $null
+
+    $descBox = New-Object System.Windows.Controls.TextBox
+    $descBox.FontSize = 13
+    $descBox.Padding = New-Object System.Windows.Thickness(10, 8, 10, 8)
+    $descBox.VerticalContentAlignment = 'Center'
+    $descBox.ToolTip = 'פרט נוסף על המשימה (מוצג ברשימה ובהתראה)'
+    if ($null -ne $existing) { $descBox.Text = [string]$existing.Description }
+    $outer.Children.Add($descBox) > $null
 
     $rowsLabel = New-Object System.Windows.Controls.TextBlock
-    $rowsLabel.Text = 'המשימות'
+    $rowsLabel.Text = 'משימות לביצוע'
     $rowsLabel.FontSize = 14
     $rowsLabel.FontWeight = 'SemiBold'
     $rowsLabel.Foreground = Get-Brush '#374151'
@@ -588,7 +709,7 @@ function Show-TaskDialog($existing) {
     $script:dlgRowsPanel = $rowsPanel
 
     $addRowBtn = New-Object System.Windows.Controls.Button
-    $addRowBtn.Content = '+ הוספת משימה נוספת (אותו זמן)'
+    $addRowBtn.Content = '+ הוספת משימה נוספת באותה שעה'
     $addRowBtn.FontSize = 13
     $addRowBtn.Padding = New-Object System.Windows.Thickness(12, 6, 12, 6)
     $addRowBtn.Background = Get-Brush '#EEF2FF'
@@ -602,7 +723,7 @@ function Show-TaskDialog($existing) {
     $btnBar = New-Object System.Windows.Controls.StackPanel
     $btnBar.Orientation = 'Horizontal'
     $btnBar.HorizontalAlignment = 'Right'
-    $btnBar.Margin = New-Object System.Windows.Thickness(0, 18, 0, 0)
+    $btnBar.Margin = New-Object System.Windows.Thickness(0, 22, 0, 0)
 
     $cancelBtn = New-Object System.Windows.Controls.Button
     $cancelBtn.Content = 'ביטול'
@@ -611,7 +732,7 @@ function Show-TaskDialog($existing) {
     $cancelBtn.FontSize = 14
     $cancelBtn.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
     $cancelBtn.Style = $script:SecondaryBtnStyle
-    $cancelBtn.Add_Click({ $win.Close() })
+    $cancelBtn.Add_Click({ Close-DialogOverlay })
     $btnBar.Children.Add($cancelBtn) > $null
 
     $saveBtn = New-Object System.Windows.Controls.Button
@@ -620,29 +741,19 @@ function Show-TaskDialog($existing) {
     $saveBtn.Height = 38
     $saveBtn.FontSize = 14
     $saveBtn.Style = $script:PrimaryBtnStyle
-    $saveBtn.Add_Click({
+    $saveAction = {
         $timeStr = $timeBox.Text.Trim()
-        if (-not ($timeStr -match '^\d{1,2}:\d{2}$')) {
-            Show-MessageDialog 'נא להזין שעה בפורמט HH:MM' 'שגיאה'
+        if (-not ($timeStr -match '^\d{1,2}:\d{2}$') -or $null -eq (Get-TimeSpanSafe $timeStr)) {
+            Show-MessageDialog 'נא להזין שעה תקינה בפורמט HH:MM' 'שגיאה'
             return
         }
         $titles = @()
-        $descs = @()
-        $first = $true
         foreach ($child in $rowsPanel.Children) {
             $boxes = @()
             foreach ($c in $child.Children) { $boxes += $c }
-            if ($boxes.Count -ge 2) {
+            if ($boxes.Count -ge 1) {
                 $tl = $boxes[0].Text.Trim()
-                $dc = $boxes[1].Text.Trim()
-                if ($first) {
-                    $titles += $tl
-                    $descs += $dc
-                    $first = $false
-                } elseif ($tl -or $dc) {
-                    $titles += $tl
-                    $descs += $dc
-                }
+                if ($tl) { $titles += $tl }
             }
         }
         if ($titles.Count -eq 0) {
@@ -672,23 +783,25 @@ function Show-TaskDialog($existing) {
                     Title = ''
                     Description = ''
                     Time = ''
-                    Repeat = 'Daily'
+                    Repeat = 'Once'
                     Days = @()
                     Date = ''
                     Notify = $false
-                    Sound = $false
+                    Sound = $true
                     RemindBefore = 0
                     Completed = @{}
                 }
             }
             $t.Title = $titles[$i]
-            $t.Description = $descs[$i]
+            $t.Description = if ($i -eq 0) { $descBox.Text.Trim() } else { '' }
             $t.Time = $timeStr
             $t.Repeat = $repeat
             if ($repeat -eq 'Weekly') { $t.Days = @($selected) }
-            elseif ($repeat -eq 'Once') { $t.Date = $onceDate.Text.Trim() }
+            elseif ($repeat -eq 'Once') {
+                if ($null -ne $onceDate.SelectedDate) { $t.Date = $onceDate.SelectedDate.ToString('yyyy-MM-dd') }
+                else { $t.Date = (Get-TodayStr) }
+            }
             $t.Notify = [bool]$notifyCheck.IsChecked
-            $t.Sound = [bool]$soundCheck.IsChecked
             $t.RemindBefore = $remind
             if ($null -eq $existing -or $i -gt 0) {
                 $script:Tasks += $t
@@ -696,29 +809,28 @@ function Show-TaskDialog($existing) {
         }
         Save-Tasks
         Refresh-List
-        $win.Tag = 'saved'
-        $win.DialogResult = $true
-        $win.Close()
-    })
+        Close-DialogOverlay
+    }
+    $saveBtn.Add_Click($saveAction)
+    $script:DlgSaveAction = $saveAction
     $btnBar.Children.Add($saveBtn) > $null
     $outer.Children.Add($btnBar) > $null
 
-    $win.Content = $outer
+    $script:DlgContent.Children.Add($outer) > $null
 
-    if ($null -eq $existing) {
-        Add-DialogRow
-        Add-DialogRow
-        $rowsPanel.Children[1].Children[0].Text = ''
-    } else {
-        Add-DialogRow
+    Add-DialogRow
+    if ($null -ne $existing) {
         $r0 = $rowsPanel.Children[0]
         $r0.Children[0].Text = $existing.Title
-        $r0.Children[1].Text = $existing.Description
-        $r0.Children[2].Visibility = 'Collapsed'
+        $r0.Children[1].Visibility = 'Collapsed'
     }
 
-    $script:dlgWin = $win
-    $null = $win.ShowDialog()
+    $script:DlgOverlay.Visibility = 'Visible'
+    try { $rowsPanel.Children[0].Children[0].Focus() } catch {}
+    $frame = New-Object System.Windows.Threading.DispatcherFrame
+    $script:DlgFrame = $frame
+    [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+    if ($script:DlgFrame -eq $frame) { $script:DlgFrame = $null }
 }
 
 function Add-QuickTask {
@@ -736,15 +848,15 @@ function Add-QuickTask {
     }
     $title = ($title -replace '\s+', ' ').Trim()
     if (-not $title) { $title = $text }
-    if (-not ($timeStr -match '^\d{1,2}:\d{2}$')) { $timeStr = (Get-Date).AddMinutes(30).ToString('HH:mm') }
+    if (-not ($timeStr -match '^\d{1,2}:\d{2}$') -or $null -eq (Get-TimeSpanSafe $timeStr)) { $timeStr = (Get-Date).AddMinutes(30).ToString('HH:mm') }
     $t = [pscustomobject]@{
         Id = [guid]::NewGuid().ToString()
         Title = $title
         Description = ''
         Time = $timeStr
-        Repeat = 'Daily'
+        Repeat = 'Once'
         Days = @()
-        Date = ''
+        Date = (Get-TodayStr)
         Notify = $true
         Sound = $true
         RemindBefore = 0
@@ -904,6 +1016,7 @@ function Celebrate-Confetti([int]$count, [string]$text, [switch]$Dim) {
 
 function Build-ToastWindow($data) {
     $win = New-Object System.Windows.Window
+    if ($null -ne $script:Window) { $win.Owner = $script:Window }
     $win.WindowStyle = 'None'
     $win.AllowsTransparency = $true
     $win.Background = [System.Windows.Media.Brushes]::Transparent
@@ -930,6 +1043,9 @@ function Build-ToastWindow($data) {
     $wrap.Effect = $shad
 
     $main = New-Object System.Windows.Controls.StackPanel
+    # Emoji markers (bell, per-row checkmarks) stay invisible until the pointer
+    # hovers the toast, then fade in so the message stays clean by default.
+    $hoverEls = New-Object System.Collections.ArrayList
 
     $top = New-Object System.Windows.Controls.DockPanel
     $icon = New-Object System.Windows.Controls.TextBlock
@@ -937,6 +1053,8 @@ function Build-ToastWindow($data) {
     $icon.FontSize = 18
     $icon.Margin = New-Object System.Windows.Thickness(0, 0, 0, 0)
     $icon.VerticalAlignment = 'Center'
+    $icon.Opacity = 0
+    $null = $hoverEls.Add($icon)
     [System.Windows.Controls.DockPanel]::SetDock($icon, 'Right')
     $top.Children.Add($icon) > $null
 
@@ -985,13 +1103,24 @@ function Build-ToastWindow($data) {
         $rb.Margin = New-Object System.Windows.Thickness(0, 3, 0, 3)
         $rb.Cursor = 'Hand'
         $rb.DataContext = [pscustomobject]@{ Id = $row.Id; Title = $row.Title }
+        $rowPanel = New-Object System.Windows.Controls.StackPanel
+        $rowPanel.Orientation = 'Horizontal'
+        $checkTxt = New-Object System.Windows.Controls.TextBlock
+        $checkTxt.Text = '☐'
+        $checkTxt.FontSize = 13
+        $checkTxt.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
+        $checkTxt.VerticalAlignment = 'Center'
+        $checkTxt.Opacity = 0
+        $null = $hoverEls.Add($checkTxt)
+        $rowPanel.Children.Add($checkTxt) > $null
         $txt = New-Object System.Windows.Controls.TextBlock
-        $txt.Text = '☐ ' + $row.Title
+        $txt.Text = $row.Title
         $txt.FontSize = 13
         $txt.FontWeight = 'SemiBold'
         $txt.TextTrimming = 'CharacterEllipsis'
         $txt.VerticalAlignment = 'Center'
-        $rb.Content = $txt
+        $rowPanel.Children.Add($txt) > $null
+        $rb.Content = $rowPanel
         $rb.Add_Click({ Handle-RowDone $this })
         $rowsPanel.Children.Add($rb) > $null
     }
@@ -1059,6 +1188,20 @@ function Build-ToastWindow($data) {
     $wrap.Child = $main
     $win.Content = $wrap
 
+    $script:ToastHover[$wrap] = $hoverEls
+    $wrap.Add_MouseEnter({
+        foreach ($el in $script:ToastHover[$this]) {
+            $el.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+            $el.Opacity = 1
+        }
+    })
+    $wrap.Add_MouseLeave({
+        foreach ($el in $script:ToastHover[$this]) {
+            $el.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+            $el.Opacity = 0
+        }
+    })
+
     $anim = New-Object System.Windows.Media.TranslateTransform(0, 30)
     $wrap.RenderTransform = $anim
     $wrap.RenderTransformOrigin = New-Object System.Windows.Point(0.5, 0.5)
@@ -1083,7 +1226,9 @@ function Build-ToastWindow($data) {
 
 function Reposition-Toasts {
     try {
-        $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        # Show toasts on the screen where the mouse currently is (multi-monitor support).
+        $scr = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
+        $wa = $scr.WorkingArea
         $margin = 18.0
         $total = 0.0
         foreach ($w in @($script:OpenToasts)) {
@@ -1097,7 +1242,29 @@ function Reposition-Toasts {
     } catch {}
 }
 
+# A fullscreen window is defined as the foreground window covering the entire
+# bounds of its screen (video players, games, presentations, etc.).
+function Test-FullscreenActive {
+    try {
+        $h = [DailyTasksFullscreen]::GetForegroundWindow()
+        if ($h -eq [IntPtr]::Zero) { return $false }
+        $r = New-Object DailyTasksFullscreen+RECT
+        [void][DailyTasksFullscreen]::GetWindowRect($h, [ref]$r)
+        $scr = [System.Windows.Forms.Screen]::FromHandle([IntPtr]$h)
+        if ($null -eq $scr) { return $false }
+        $b = $scr.Bounds
+        return ($r.Left -le $b.Left -and $r.Top -le $b.Top -and $r.Right -ge $b.Right -and $r.Bottom -ge $b.Bottom)
+    } catch {
+        return $false
+    }
+}
+
 function Show-Toast($win) {
+    if (-not $script:ShowToastsFullscreen -and (Test-FullscreenActive)) {
+        Write-Log 'Show-Toast: fullscreen app active, notification suppressed'
+        try { if ($win.IsVisible) { $win.Close() } } catch {}
+        return
+    }
     $script:OpenToasts += $win
     $null = $win.Show()
 }
@@ -1108,6 +1275,7 @@ function Close-Toast($win) {
 
 function Handle-ToastClosed($win) {
     $script:OpenToasts = @($script:OpenToasts | Where-Object { $_ -ne $win })
+    if ($null -ne $win.Content) { $script:ToastHover.Remove($win.Content) }
     Reposition-Toasts
 }
 
@@ -1158,7 +1326,7 @@ function Show-Notifications([object[]]$taskList) {
     $shouldSound = $false
     foreach ($t in $taskList) {
         $ids += $t.Id
-        if ($t.Sound) { $shouldSound = $true }
+        $shouldSound = $script:SoundEnabled
         if (-not $script:NotifiedIds.ContainsKey($today)) { $script:NotifiedIds[$today] = @() }
         if ($script:NotifiedIds[$today] -notcontains $t.Id) {
             $script:NotifiedIds[$today] = @($script:NotifiedIds[$today]) + $t.Id
@@ -1239,42 +1407,48 @@ function Handle-RowDone($rb) {
 
 function On-Tick {
     if ($script:Exiting) { return }
-    $now = Get-Date
-    $today = Get-TodayStr
-    $cut = $now.AddMinutes(-0.5)
-    $expired = @()
-    foreach ($k in @($script:Snoozed.Keys)) {
-        if ($script:Snoozed[$k] -le $cut) {
-            $expired += $k
+    try {
+        $now = Get-Date
+        $today = Get-TodayStr
+        $cut = $now.AddMinutes(-0.5)
+        $expired = @()
+        foreach ($k in @($script:Snoozed.Keys)) {
+            if ($script:Snoozed[$k] -le $cut) {
+                $expired += $k
+            }
         }
-    }
-    foreach ($id in $expired) {
-        $script:Snoozed.Remove($id)
-        if ($script:NotifiedIds.ContainsKey($today)) {
-            $script:NotifiedIds[$today] = @($script:NotifiedIds[$today] | Where-Object { $_ -ne $id })
+        foreach ($id in $expired) {
+            $script:Snoozed.Remove($id)
+            if ($script:NotifiedIds.ContainsKey($today)) {
+                $script:NotifiedIds[$today] = @($script:NotifiedIds[$today] | Where-Object { $_ -ne $id })
+            }
         }
-    }
-    $due = @()
-    $nowDow = [int]$now.DayOfWeek
-    foreach ($t in $script:Tasks) {
-        $isToday = $false
-        if ($t.Repeat -eq 'Once') { $isToday = ($t.Date -eq $today) }
-        elseif ($t.Repeat -eq 'Weekly') { $isToday = ($t.Days -contains $nowDow) }
-        else { $isToday = $true }
-        if (-not $isToday) { continue }
-        if (-not $t.Notify) { continue }
-        if ($t.Completed.ContainsKey($today)) { continue }
-        if ($script:Snoozed.ContainsKey($t.Id)) { continue }
-        if ($script:NotifiedIds.ContainsKey($today) -and $script:NotifiedIds[$today] -contains $t.Id) { continue }
-        $target = [datetime]::Today.Add([TimeSpan]::Parse($t.Time))
-        if ($t.RemindBefore -gt 0) { $target = $target.AddMinutes(-$t.RemindBefore) }
-        if ($now -ge $target) {
-            $due += $t
+        $due = @()
+        $nowDow = [int]$now.DayOfWeek
+        foreach ($t in $script:Tasks) {
+            $isToday = $false
+            if ($t.Repeat -eq 'Once') { $isToday = ($t.Date -eq $today) }
+            elseif ($t.Repeat -eq 'Weekly') { $isToday = ($t.Days -contains $nowDow) }
+            else { $isToday = $true }
+            if (-not $isToday) { continue }
+            if (-not $t.Notify) { continue }
+            if ($t.Completed.ContainsKey($today)) { continue }
+            if ($script:Snoozed.ContainsKey($t.Id)) { continue }
+            if ($script:NotifiedIds.ContainsKey($today) -and $script:NotifiedIds[$today] -contains $t.Id) { continue }
+            $ts = Get-TimeSpanSafe $t.Time
+            if ($null -eq $ts) { continue }
+            $target = [datetime]::Today.Add($ts)
+            if ($t.RemindBefore -gt 0) { $target = $target.AddMinutes(-$t.RemindBefore) }
+            if ($now -ge $target) {
+                $due += $t
+            }
         }
-    }
-    if ($due.Count -gt 0) {
-        Show-Notifications $due
-    }
+        if ($due.Count -gt 0) {
+            Show-Notifications $due
+        }
+        # Keep the "בעוד X דקות" counters fresh without losing the scroll position.
+        if ($script:Window.IsVisible) { Refresh-List }
+    } catch { Write-Log ('On-Tick: ' + $_.Exception.ToString()) }
 }
 
 function Initialize-Notified {
@@ -1290,13 +1464,121 @@ function Initialize-Notified {
         if (-not $isToday) { continue }
         if (-not $t.Notify) { continue }
         if ($t.Completed.ContainsKey($today)) { continue }
-        $target = [datetime]::Today.Add([TimeSpan]::Parse($t.Time))
+        $ts = Get-TimeSpanSafe $t.Time
+        if ($null -eq $ts) { continue }
+        $target = [datetime]::Today.Add($ts)
         if ($t.RemindBefore -gt 0) { $target = $target.AddMinutes(-$t.RemindBefore) }
         if ($now -ge $target) { $already += $t.Id }
     }
     if ($already.Count -gt 0) {
         $script:NotifiedIds[$today] = @($already)
     }
+    # Return the missed ids so the caller can surface a "missed tasks" toast.
+    return @($already)
+}
+
+# Reorders a task by moving it one position in the list (drag & drop / keyboard order)
+function Move-Task([string]$id, [int]$delta) {
+    $idx = -1
+    for ($i = 0; $i -lt $script:Tasks.Count; $i++) {
+        if ($script:Tasks[$i].Id -eq $id) { $idx = $i; break }
+    }
+    if ($idx -lt 0) { return }
+    $newIdx = $idx + $delta
+    if ($newIdx -lt 0 -or $newIdx -ge $script:Tasks.Count) { return }
+    $item = $script:Tasks[$idx]
+    $script:Tasks.RemoveAt($idx)
+    $script:Tasks.Insert($newIdx, $item)
+    Save-Tasks
+    Refresh-List
+}
+
+function Find-ListBoxItemAt($list, [System.Windows.Point]$pos) {
+    try {
+        $hit = [System.Windows.Media.VisualTreeHelper]::HitTest($list, $pos)
+        if ($null -eq $hit) { return $null }
+        $d = $hit.VisualHit
+        while ($null -ne $d -and -not ($d -is [System.Windows.Controls.ListBoxItem])) {
+            $d = [System.Windows.Media.VisualTreeHelper]::GetParent($d)
+        }
+        return $d
+    } catch { return $null }
+}
+
+# Drag & drop to reorder tasks (the manual order is kept by Refresh-List)
+function Enable-ListDragReorder {
+    $script:TaskList.AllowDrop = $true
+    $script:DragStartPoint = $null
+    $script:TaskList.Add_PreviewMouseLeftButtonDown({
+        $script:DragStartPoint = $_.GetPosition($script:TaskList)
+    })
+    $script:TaskList.Add_PreviewMouseMove({
+        if ($_.LeftButton -eq 'Pressed' -and $null -ne $script:DragStartPoint) {
+            $pos = $_.GetPosition($script:TaskList)
+            $diff = $pos - $script:DragStartPoint
+            if ([math]::Abs($diff.X) -gt 6 -or [math]::Abs($diff.Y) -gt 6) {
+                $item = Find-ListBoxItemAt $script:TaskList $pos
+                if ($null -ne $item -and $null -ne $item.DataContext -and $null -ne $item.DataContext.Id) {
+                    $script:DragStartPoint = $null
+                    [void][System.Windows.DragDrop]::DoDragDrop($script:TaskList, [string]$item.DataContext.Id, [System.Windows.DragDropEffects]::Move)
+                }
+            }
+        }
+    })
+    $script:TaskList.Add_DragOver({
+        $_.Effects = [System.Windows.DragDropEffects]::Move
+        $_.Handled = $true
+    })
+    $script:TaskList.Add_Drop({
+        try {
+            $id = $_.Data.GetData([string])
+            if ($null -eq $id) { return }
+            $pos = $_.GetPosition($script:TaskList)
+            $target = Find-ListBoxItemAt $script:TaskList $pos
+            if ($null -eq $target -or $null -eq $target.DataContext -or $null -eq $target.DataContext.Id) { return }
+            if ([string]$target.DataContext.Id -eq [string]$id) { return }
+            $srcIdx = -1; $dstIdx = -1
+            for ($i = 0; $i -lt $script:Tasks.Count; $i++) {
+                if ($script:Tasks[$i].Id -eq [string]$id) { $srcIdx = $i }
+                if ($script:Tasks[$i].Id -eq [string]$target.DataContext.Id) { $dstIdx = $i }
+            }
+            if ($srcIdx -lt 0 -or $dstIdx -lt 0 -or $srcIdx -eq $dstIdx) { return }
+            $item = $script:Tasks[$srcIdx]
+            $script:Tasks.RemoveAt($srcIdx)
+            if ($dstIdx -gt $srcIdx) { $dstIdx-- }
+            $script:Tasks.Insert($dstIdx, $item)
+            Save-Tasks
+            Refresh-List
+        } catch { Write-Log ('List drop: ' + $_.Exception.Message) }
+    })
+}
+
+# Toast shown once when the app starts after tasks were missed while it was closed.
+function Show-MissedToast([string[]]$ids) {
+    if ($script:MissedShown) { return }
+    $script:MissedShown = $true
+    if ($null -eq $ids -or $ids.Count -eq 0) { return }
+    try {
+        $tasks = @()
+        foreach ($id in $ids) {
+            $t = Find-TaskById $id
+            if ($null -ne $t) { $tasks += $t }
+        }
+        if ($tasks.Count -eq 0) { return }
+        $rows = @()
+        foreach ($t in $tasks) { $rows += [pscustomobject]@{ Id = $t.Id; Title = $t.Title } }
+        $data = [pscustomobject]@{
+            Header = ($tasks.Count.ToString() + ' משימות שהוחמצו')
+            Display = 'הגיע הזמן בזמן שהתוכנה הייתה סגורה'
+            Rows = @($rows)
+            Multi = $true
+            TaskIds = @($tasks.Id)
+            DoneCount = 0
+        }
+        $win = Build-ToastWindow $data
+        $win.Tag = $data
+        Show-Toast $win
+    } catch { Write-Log ('Show-MissedToast: ' + $_.Exception.Message) }
 }
 
 function Get-StyleFromXaml([string]$xaml) {
@@ -1313,10 +1595,11 @@ function New-SharedStyles {
   <Setter Property="FontWeight" Value="SemiBold"/>
   <Setter Property="Cursor" Value="Hand"/>
   <Setter Property="BorderThickness" Value="0"/>
+  <Setter Property="Padding" Value="14,7"/>
   <Setter Property="Template">
     <Setter.Value>
       <ControlTemplate TargetType="Button">
-        <Border x:Name="bd" Background="#4F46E5" CornerRadius="8" Padding="14,7">
+        <Border x:Name="bd" Background="#4F46E5" CornerRadius="8" Padding="{TemplateBinding Padding}">
           <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Border>
         <ControlTemplate.Triggers>
@@ -1334,10 +1617,11 @@ function New-SharedStyles {
   <Setter Property="Foreground" Value="#374151"/>
   <Setter Property="Cursor" Value="Hand"/>
   <Setter Property="BorderThickness" Value="1"/>
+  <Setter Property="Padding" Value="14,7"/>
   <Setter Property="Template">
     <Setter.Value>
       <ControlTemplate TargetType="Button">
-        <Border x:Name="bd" Background="#FFFFFF" BorderBrush="#D1D5DB" CornerRadius="8" Padding="14,7">
+        <Border x:Name="bd" Background="#FFFFFF" BorderBrush="#D1D5DB" CornerRadius="8" Padding="{TemplateBinding Padding}">
           <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Border>
         <ControlTemplate.Triggers>
@@ -1355,10 +1639,11 @@ function New-SharedStyles {
   <Setter Property="Cursor" Value="Hand"/>
   <Setter Property="Background" Value="Transparent"/>
   <Setter Property="BorderThickness" Value="0"/>
+  <Setter Property="Padding" Value="6,4"/>
   <Setter Property="Template">
     <Setter.Value>
       <ControlTemplate TargetType="Button">
-        <Border x:Name="bd" Background="#00000000" CornerRadius="6" Padding="6,4">
+        <Border x:Name="bd" Background="#00000000" CornerRadius="6" Padding="{TemplateBinding Padding}">
           <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Border>
         <ControlTemplate.Triggers>
@@ -1372,33 +1657,252 @@ function New-SharedStyles {
 '@
 }
 
-function Show-MessageDialog([string]$message, [string]$title, [switch]$Confirm) {
-    $d = New-Object System.Windows.Window
-    $d.Title = $title
-    $d.Width = 380
-    $d.SizeToContent = 'Height'
-    $d.WindowStartupLocation = 'CenterOwner'
-    $d.ResizeMode = 'NoResize'
-    $d.WindowStyle = 'SingleBorderWindow'
-    $d.FlowDirection = 'RightToLeft'
-    $d.Background = Get-Brush '#FFFFFF'
-    $d.FontFamily = New-Object System.Windows.Media.FontFamily('Segoe UI')
+function Test-NewerVersion([string]$tag) {
+    $tag = $tag -replace '^[vV]', ''
+    $cur = @($script:AppVersion -split '\.')
+    $new = @($tag -split '\.')
+    for ($i = 0; $i -lt [Math]::Max($cur.Count, $new.Count); $i++) {
+        $a = 0; $b = 0
+        if ($i -lt $cur.Count) { [void][int]::TryParse(($cur[$i] -replace '\D', ''), [ref]$a) }
+        if ($i -lt $new.Count) { [void][int]::TryParse(($new[$i] -replace '\D', ''), [ref]$b) }
+        if ($b -gt $a) { return $true }
+        if ($b -lt $a) { return $false }
+    }
+    return $false
+}
 
-    $root = New-Object System.Windows.Controls.StackPanel
-    $root.Margin = New-Object System.Windows.Thickness(24, 22, 24, 20)
+function Start-UpdateCheck([switch]$Manual) {
+    if ($script:UpdateChecking) { return }
+    $script:UpdateChecking = $true
+    try {
+        $script:UpdateJob = Start-Job -ScriptBlock {
+            param($url)
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $r = Invoke-RestMethod -Uri $url -Headers @{ 'User-Agent' = 'DailyTasks-UpdateChecker' } -TimeoutSec 12
+                $asset = $r.assets | Where-Object { $_.name -eq 'DailyTasks-Setup.exe' } | Select-Object -First 1
+                if ($null -eq $asset) { $asset = $r.assets | Where-Object { $_.name -match 'Setup.*\.exe$' } | Select-Object -First 1 }
+                if ($null -eq $asset) { return $null }
+                return @{
+                    Tag  = [string]$r.tag_name
+                    Down = [string]$asset.browser_download_url
+                }
+            } catch { return $null }
+        } -ArgumentList $script:UpdateUrl
+    } catch {
+        $script:UpdateChecking = $false
+        if ($Manual) { [void](Show-MessageDialog 'לא ניתן היה לבדוק עדכונים. בדקו את חיבור האינטרנט ונסו שוב.' 'בדיקת עדכונים') }
+        return
+    }
+    if ($null -eq $script:UpdateTimer) {
+        $script:UpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:UpdateTimer.Interval = [TimeSpan]::FromSeconds(1)
+        $script:UpdateTimer.Add_Tick({ Complete-UpdateCheck })
+    }
+    $script:UpdateTimer.Start()
+}
+
+function Complete-UpdateCheck {
+    if ($null -eq $script:UpdateJob) { return }
+    if ($script:UpdateJob.State -ne 'Completed' -and $script:UpdateJob.State -ne 'Failed') { return }
+    $job = $script:UpdateJob
+    $script:UpdateJob = $null
+    try { $script:UpdateTimer.Stop() } catch {}
+    $script:UpdateChecking = $false
+    $info = $null
+    try { $info = @(Receive-Job -Job $job) | Select-Object -First 1 } catch { $info = $null }
+    try { Remove-Job -Job $job -Force } catch {}
+    if ($null -eq $info -or [string]::IsNullOrWhiteSpace([string]$info.Tag)) { return }
+    if (Test-NewerVersion ([string]$info.Tag)) {
+        Show-UpdateDialog $info
+    }
+}
+
+function Close-UpdateDialog([string]$result) {
+    $script:DlgResult = $result
+    try { $script:DlgMsgContent.Visibility = 'Collapsed' } catch {}
+    if (-not $script:DlgMsgWasOpen) { try { $script:DlgOverlay.Visibility = 'Collapsed' } catch {} }
+    if ($null -ne $script:DlgFrame) { $script:DlgFrame.Continue = $false; $script:DlgFrame = $null }
+}
+
+function Show-UpdateDialog($info) {
+    if ($null -eq $script:DlgMsgContent) { return }
+    $script:DlgMsgWasOpen = ($script:DlgOverlay.Visibility -eq 'Visible')
+    $script:DlgMsgContent.Children.Clear()
+    $script:DlgResult = 'no'
+    $script:DlgSaveAction = $null
+    $script:UpdatePhase = 'idle'
+    $script:DlgMsgContent.Visibility = 'Visible'
+
+    $frame = New-Object System.Windows.Threading.DispatcherFrame
+    $script:DlgFrame = $frame
+
+    $stack = New-Object System.Windows.Controls.StackPanel
+
+    $head = New-Object System.Windows.Controls.TextBlock
+    $head.Text = '🔄 עדכון זמין'
+    $head.FontSize = 17
+    $head.FontWeight = 'Bold'
+    $head.Foreground = Get-Brush '#111827'
+    $head.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
+    $stack.Children.Add($head) > $null
+
+    $msg = New-Object System.Windows.Controls.TextBlock
+    $msg.Text = "קיימת גרסה חדשה: $($info.Tag)`nהגרסה הנוכחית שלך: $($script:AppVersion)`n`nרוצים להוריד ולהתקין אותה עכשיו?"
+    $msg.FontSize = 14
+    $msg.Foreground = Get-Brush '#374151'
+    $msg.TextWrapping = 'Wrap'
+    $msg.MaxWidth = 430
+    $stack.Children.Add($msg) > $null
+    $script:UpdateMsg = $msg
+
+    $bar = New-Object System.Windows.Controls.StackPanel
+    $bar.Orientation = 'Horizontal'
+    $bar.HorizontalAlignment = 'Right'
+    $bar.Margin = New-Object System.Windows.Thickness(0, 18, 0, 0)
+
+    $laterBtn = New-Object System.Windows.Controls.Button
+    $laterBtn.Content = 'לא עכשיו'
+    $laterBtn.Width = 100
+    $laterBtn.Height = 36
+    $laterBtn.FontSize = 13
+    $laterBtn.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
+    $laterBtn.Style = $script:SecondaryBtnStyle
+    $laterBtn.Add_Click({
+        if ($script:UpdatePhase -ne 'downloading') { Close-UpdateDialog 'no' }
+    })
+    $bar.Children.Add($laterBtn) > $null
+
+    $dlBtn = New-Object System.Windows.Controls.Button
+    $dlBtn.Content = 'הורד והתקן'
+    $dlBtn.Width = 130
+    $dlBtn.Height = 36
+    $dlBtn.FontSize = 13
+    $dlBtn.Style = $script:PrimaryBtnStyle
+    $dlBtn.Add_Click({
+        if ($script:UpdatePhase -eq 'idle') {
+            $script:UpdatePhase = 'downloading'
+            $script:UpdateDlBtn.IsEnabled = $false
+            $script:UpdateLaterBtn.IsEnabled = $false
+            $script:UpdateMsg.Text = 'מורידים את הגרסה החדשה... זה עלול לקחת כמה רגעים.'
+            Start-UpdateDownload ([string]$info.Down)
+        } elseif ($script:UpdatePhase -eq 'ready') {
+            Close-UpdateDialog 'install'
+        }
+    })
+    $bar.Children.Add($dlBtn) > $null
+
+    $script:UpdateDlBtn = $dlBtn
+    $script:UpdateLaterBtn = $laterBtn
+
+    $stack.Children.Add($bar) > $null
+    $script:DlgMsgContent.Children.Add($stack) > $null
+
+    $script:DlgOverlay.Visibility = 'Visible'
+    [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+    if ($script:DlgFrame -eq $frame) { $script:DlgFrame = $null }
+    if ($script:DlgResult -eq 'install') { Launch-Installer }
+}
+
+function Start-UpdateDownload([string]$url) {
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        $script:UpdatePhase = 'failed'
+        if ($null -ne $script:UpdateMsg) { $script:UpdateMsg.Text = 'קישור ההורדה לא נמצא. הורידו ידנית מדף המהדורות באתר.' }
+        if ($null -ne $script:UpdateDlBtn) { $script:UpdateDlBtn.IsEnabled = $false }
+        if ($null -ne $script:UpdateLaterBtn) { $script:UpdateLaterBtn.Content = 'סגירה'; $script:UpdateLaterBtn.IsEnabled = $true }
+        return
+    }
+    $target = Join-Path ([System.IO.Path]::GetTempPath()) 'DailyTasks-Setup.exe'
+    $script:DownloadTarget = $target
+    try {
+        $script:DownloadJob = Start-Job -ScriptBlock {
+            param($u, $t)
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $u -OutFile $t -UseBasicParsing -UserAgent 'DailyTasks-Update' -TimeoutSec 300
+                return (Test-Path -LiteralPath $t)
+            } catch { return $false }
+        } -ArgumentList $url, $target
+    } catch {
+        $script:UpdatePhase = 'failed'
+        if ($null -ne $script:UpdateMsg) { $script:UpdateMsg.Text = 'ההורדה נכשלה. נסו שוב מאוחר יותר או הורידו ידנית מדף המהדורות.' }
+        if ($null -ne $script:UpdateDlBtn) { $script:UpdateDlBtn.IsEnabled = $false }
+        if ($null -ne $script:UpdateLaterBtn) { $script:UpdateLaterBtn.Content = 'סגירה'; $script:UpdateLaterBtn.IsEnabled = $true }
+        return
+    }
+    if ($null -eq $script:DownloadTimer) {
+        $script:DownloadTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:DownloadTimer.Interval = [TimeSpan]::FromSeconds(1)
+        $script:DownloadTimer.Add_Tick({ Complete-UpdateDownload })
+    }
+    $script:DownloadTimer.Start()
+}
+
+function Complete-UpdateDownload {
+    if ($null -eq $script:DownloadJob) { return }
+    if ($script:DownloadJob.State -ne 'Completed' -and $script:DownloadJob.State -ne 'Failed') { return }
+    $job = $script:DownloadJob
+    $script:DownloadJob = $null
+    try { $script:DownloadTimer.Stop() } catch {}
+    $ok = $false
+    try { $ok = [bool](Receive-Job -Job $job) } catch { $ok = $false }
+    try { Remove-Job -Job $job -Force } catch {}
+    if ($ok -and (Test-Path -LiteralPath $script:DownloadTarget)) {
+        $script:UpdatePhase = 'ready'
+        if ($null -ne $script:UpdateMsg) { $script:UpdateMsg.Text = 'ההורדה הושלמה! לחצו "התקן עכשיו" כדי להתקין את הגרסה החדשה.' }
+        if ($null -ne $script:UpdateDlBtn) { $script:UpdateDlBtn.Content = 'התקן עכשיו'; $script:UpdateDlBtn.IsEnabled = $true }
+        if ($null -ne $script:UpdateLaterBtn) { $script:UpdateLaterBtn.IsEnabled = $true }
+    } else {
+        $script:UpdatePhase = 'failed'
+        if ($null -ne $script:UpdateMsg) { $script:UpdateMsg.Text = 'ההורדה נכשלה. נסו שוב מאוחר יותר, או הורידו ידנית מדף המהדורות באתר.' }
+        if ($null -ne $script:UpdateDlBtn) { $script:UpdateDlBtn.IsEnabled = $false }
+        if ($null -ne $script:UpdateLaterBtn) { $script:UpdateLaterBtn.Content = 'סגירה'; $script:UpdateLaterBtn.IsEnabled = $true }
+    }
+}
+
+function Launch-Installer {
+    $exe = $script:DownloadTarget
+    if (-not (Test-Path -LiteralPath $exe)) { return }
+    try { Start-Process -FilePath $exe } catch {}
+    $t = New-Object System.Windows.Threading.DispatcherTimer
+    $t.Interval = [TimeSpan]::FromSeconds(2)
+    $t.Add_Tick({
+        $t.Stop()
+        Exit-App
+    })
+    $t.Start()
+}
+
+function Show-MessageDialog([string]$message, [string]$title, [switch]$Confirm) {
+    if ($null -eq $script:DlgMsgContent) { return 'no' }
+    $script:DlgMsgWasOpen = ($script:DlgOverlay.Visibility -eq 'Visible')
+    $script:DlgMsgContent.Children.Clear()
+    $script:DlgResult = 'no'
+    $script:DlgMsgContent.Visibility = 'Visible'
+
+    $head = New-Object System.Windows.Controls.TextBlock
+    $head.Text = $title
+    $head.FontSize = 17
+    $head.FontWeight = 'Bold'
+    $head.Foreground = Get-Brush '#111827'
+    $head.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
+    $script:DlgMsgContent.Children.Add($head) > $null
 
     $msg = New-Object System.Windows.Controls.TextBlock
     $msg.Text = $message
     $msg.FontSize = 14
     $msg.Foreground = Get-Brush '#374151'
     $msg.TextWrapping = 'Wrap'
-    $msg.MaxWidth = 330
-    $root.Children.Add($msg) > $null
+    $msg.MaxWidth = 430
+    $script:DlgMsgContent.Children.Add($msg) > $null
 
     $bar = New-Object System.Windows.Controls.StackPanel
     $bar.Orientation = 'Horizontal'
     $bar.HorizontalAlignment = 'Right'
-    $bar.Margin = New-Object System.Windows.Thickness(0, 20, 0, 0)
+    $bar.Margin = New-Object System.Windows.Thickness(0, 18, 0, 0)
+
+    $frame = New-Object System.Windows.Threading.DispatcherFrame
+    $script:DlgFrame = $frame
 
     if ($Confirm) {
         $cancelBtn = New-Object System.Windows.Controls.Button
@@ -1408,7 +1912,12 @@ function Show-MessageDialog([string]$message, [string]$title, [switch]$Confirm) 
         $cancelBtn.FontSize = 13
         $cancelBtn.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
         $cancelBtn.Style = $script:SecondaryBtnStyle
-        $cancelBtn.Add_Click({ $d.Tag = 'no'; $d.Close() })
+        $cancelBtn.Add_Click({
+            $script:DlgResult = 'no'
+            $script:DlgMsgContent.Visibility = 'Collapsed'
+            if (-not $script:DlgMsgWasOpen) { $script:DlgOverlay.Visibility = 'Collapsed' }
+            $frame.Continue = $false
+        })
         $bar.Children.Add($cancelBtn) > $null
 
         $okBtn = New-Object System.Windows.Controls.Button
@@ -1417,7 +1926,12 @@ function Show-MessageDialog([string]$message, [string]$title, [switch]$Confirm) 
         $okBtn.Height = 36
         $okBtn.FontSize = 13
         $okBtn.Style = $script:PrimaryBtnStyle
-        $okBtn.Add_Click({ $d.Tag = 'yes'; $d.Close() })
+        $okBtn.Add_Click({
+            $script:DlgResult = 'yes'
+            $script:DlgMsgContent.Visibility = 'Collapsed'
+            if (-not $script:DlgMsgWasOpen) { $script:DlgOverlay.Visibility = 'Collapsed' }
+            $frame.Continue = $false
+        })
         $bar.Children.Add($okBtn) > $null
     } else {
         $okBtn = New-Object System.Windows.Controls.Button
@@ -1426,14 +1940,29 @@ function Show-MessageDialog([string]$message, [string]$title, [switch]$Confirm) 
         $okBtn.Height = 36
         $okBtn.FontSize = 13
         $okBtn.Style = $script:PrimaryBtnStyle
-        $okBtn.Add_Click({ $d.Tag = 'ok'; $d.Close() })
+        $okBtn.Add_Click({
+            $script:DlgResult = 'ok'
+            $script:DlgMsgContent.Visibility = 'Collapsed'
+            if (-not $script:DlgMsgWasOpen) { $script:DlgOverlay.Visibility = 'Collapsed' }
+            $frame.Continue = $false
+        })
         $bar.Children.Add($okBtn) > $null
     }
 
-    $root.Children.Add($bar) > $null
-    $d.Content = $root
-    $null = $d.ShowDialog()
-    return $d.Tag
+    $script:DlgMsgContent.Children.Add($bar) > $null
+
+    $script:DlgOverlay.Visibility = 'Visible'
+    [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+    if ($script:DlgFrame -eq $frame) { $script:DlgFrame = $null }
+    return $script:DlgResult
+}
+
+function Close-DialogOverlay {
+    try { if ($null -ne $script:DlgOverlay) { $script:DlgOverlay.Visibility = 'Collapsed' } } catch {}
+    try { if ($null -ne $script:DlgContent) { $script:DlgContent.Children.Clear() } } catch {}
+    $script:DlgSaveAction = $null
+    $script:DlgResult = $null
+    if ($null -ne $script:DlgFrame) { $script:DlgFrame.Continue = $false; $script:DlgFrame = $null }
 }
 
 $script:MainXaml = @'
@@ -1441,7 +1970,7 @@ $script:MainXaml = @'
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="משימות יומיות"
-        Width="320" Height="640" MinWidth="290" MinHeight="460"
+        Width="360" Height="700" MinWidth="320" MinHeight="500"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         WindowStartupLocation="Manual" ResizeMode="CanResize"
         FlowDirection="RightToLeft"
@@ -1456,6 +1985,104 @@ $script:MainXaml = @'
       <Setter Property="Foreground" Value="#111827"/>
       <Setter Property="BorderThickness" Value="1"/>
       <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="2,1,2,1" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#9CA3AF"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#374151"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <StackPanel Orientation="Horizontal">
+              <Border x:Name="box" Width="20" Height="20" CornerRadius="6" Background="#FFFFFF" BorderBrush="#C7CBD1" BorderThickness="1.5" VerticalAlignment="Center">
+                <Path x:Name="check" Data="M 3,10.5 L 7,14.5 L 16,5.5" Stroke="#4F46E5" StrokeThickness="2.2"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                      Visibility="Collapsed" FlowDirection="LeftToRight"/>
+              </Border>
+              <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="box" Property="Background" Value="#EEF2FF"/>
+                <Setter TargetName="box" Property="BorderBrush" Value="#4F46E5"/>
+                <Setter TargetName="check" Property="Visibility" Value="Visible"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="box" Property="BorderBrush" Value="#4F46E5"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="TaskCheckStyle" TargetType="CheckBox">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Grid Width="26" Height="26">
+              <Ellipse x:Name="bg" Fill="Transparent"/>
+              <TextBlock x:Name="glyph" Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="16"
+                         Foreground="#C4CBD4" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="glyph" Property="Foreground" Value="#8B93A3"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="bg" Property="Fill" Value="#D1FAE5"/>
+                <Setter TargetName="glyph" Property="Foreground" Value="#10B981"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Width" Value="10"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False" Opacity="0"/>
+                </Track.DecreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Focusable="False">
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="thumb" Background="#C9CDD4" CornerRadius="5" Margin="2"/>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="thumb" Property="Background" Value="#9CA3AF"/></Trigger>
+                          <Trigger Property="IsDragging" Value="True"><Setter TargetName="thumb" Property="Background" Value="#6B7280"/></Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False" Opacity="0"/>
+                </Track.IncreaseRepeatButton>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
     <Style x:Key="FilterStyle" TargetType="Button">
       <Setter Property="FontSize" Value="13"/>
@@ -1464,10 +2091,11 @@ $script:MainXaml = @'
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="Background" Value="#FFFFFF"/>
       <Setter Property="Foreground" Value="#374151"/>
+      <Setter Property="Padding" Value="14,6"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="14,6">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -1483,10 +2111,11 @@ $script:MainXaml = @'
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="14,7"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="#4F46E5" CornerRadius="8" Padding="14,7">
+            <Border x:Name="bd" Background="#4F46E5" CornerRadius="8" Padding="{TemplateBinding Padding}">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -1502,10 +2131,11 @@ $script:MainXaml = @'
       <Setter Property="Foreground" Value="#6B7280"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="6,4"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="#00000000" CornerRadius="6" Padding="6,4">
+            <Border x:Name="bd" Background="#00000000" CornerRadius="6" Padding="{TemplateBinding Padding}">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -1518,7 +2148,7 @@ $script:MainXaml = @'
     </Style>
   </Window.Resources>
 
-  <Border CornerRadius="14" Background="#F3F4F6" BorderBrush="#E5E7EB" BorderThickness="1" Padding="0">
+  <Border CornerRadius="14" Background="#F7F8FC" BorderBrush="#E5E7EB" BorderThickness="1" Padding="0">
     <Grid>
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
@@ -1529,23 +2159,26 @@ $script:MainXaml = @'
         <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
 
-      <Grid Grid.Row="0" Margin="16,6,16,4">
+      <Grid Grid.Row="0" Margin="18,9,18,6">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,0">
-          <TextBlock Text="&#x1F4CB;" FontSize="17" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <Border Width="30" Height="30" CornerRadius="9" Background="#EEF2FF" VerticalAlignment="Center" Margin="0,0,8,0">
+            <TextBlock Text="&#xE9B4;" FontFamily="Segoe MDL2 Assets" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
           <TextBlock Text="משימות יומיות" FontSize="16" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
-          <Button x:Name="MinBtn" Content="&#x2013;" Width="34" Height="30" Margin="0,0,5,0" FontSize="14" Style="{StaticResource FilterStyle}" ToolTip="מזעור"/>
-          <Button x:Name="CloseBtn" Content="&#x2715;" Width="34" Height="30" FontSize="12" Foreground="#6B7280" Style="{StaticResource FilterStyle}" ToolTip="סגירה למגש"/>
+          <Button x:Name="SoundBtn" Content="&#xE767;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="0,0,5,0" FontSize="15" Padding="0" Style="{StaticResource FilterStyle}" ToolTip="צליל התראות: מופעל"/>
+          <Button x:Name="MinBtn" Content="&#xE921;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="0,0,5,0" FontSize="14" Padding="0" Style="{StaticResource FilterStyle}" ToolTip="מזעור"/>
+          <Button x:Name="CloseBtn" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" FontSize="14" Padding="0" Foreground="#6B7280" Style="{StaticResource FilterStyle}" ToolTip="סגירה למגש"/>
         </StackPanel>
       </Grid>
 
-      <Border Grid.Row="1" Margin="14,0,14,12" CornerRadius="16" Padding="18,14">
+      <Border Grid.Row="1" Margin="16,0,16,14" CornerRadius="16" Padding="20,16">
         <Border.Background>
           <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
             <GradientStop Color="#6366F1" Offset="0"/>
@@ -1589,48 +2222,31 @@ $script:MainXaml = @'
         </Grid>
       </Border>
 
-      <Border Grid.Row="2" Margin="14,0,14,12" CornerRadius="12" Background="#FFFFFF" BorderBrush="#E5E7EB" BorderThickness="1" Padding="12">
+      <Border Grid.Row="2" Margin="16,0,16,14" CornerRadius="12" Background="#FFFFFF" BorderBrush="#E5E7EB" BorderThickness="1" Padding="14">
         <Grid>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-          </Grid.RowDefinitions>
           <Grid>
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <Grid>
-              <TextBlock x:Name="QuickHint" Text="הוספה מהירה: כתבו משימה ו-Enter..." FontSize="13" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False"/>
+              <TextBlock x:Name="QuickHint" Text="הוספה מהירה — כתבו משימה ולחצו Enter" FontSize="13" Foreground="#6B7280" VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False"/>
               <TextBox x:Name="QuickBox" FontSize="13" HorizontalAlignment="Stretch" Background="Transparent">
                 <TextBox.Style>
-                  <Style TargetType="TextBox">
+                  <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
                     <Setter Property="FontSize" Value="13"/>
                     <Setter Property="Padding" Value="10,7"/>
-                    <Setter Property="BorderBrush" Value="#D1D5DB"/>
+                    <Setter Property="BorderBrush" Value="Transparent"/>
                     <Setter Property="VerticalContentAlignment" Value="Center"/>
                   </Style>
                 </TextBox.Style>
               </TextBox>
             </Grid>
-            <Button x:Name="AddBtn" Grid.Column="1" Content="משימה מפורטת" Width="120" Height="34" Margin="10,0,0,0" Style="{StaticResource PrimaryBtnStyle}" ToolTip="פתיחת חלון הוספה/עריכה מפורטת של משימה"/>
-          </Grid>
-          <Grid Grid.Row="1" Margin="0,8,0,0">
-            <TextBlock x:Name="SearchHint" Text="חיפוש משימות..." FontSize="13" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False"/>
-            <TextBox x:Name="SearchBox" FontSize="13" HorizontalAlignment="Stretch" Background="Transparent">
-              <TextBox.Style>
-                <Style TargetType="TextBox">
-                  <Setter Property="FontSize" Value="13"/>
-                  <Setter Property="Padding" Value="10,7"/>
-                  <Setter Property="BorderBrush" Value="#D1D5DB"/>
-                  <Setter Property="VerticalContentAlignment" Value="Center"/>
-                </Style>
-              </TextBox.Style>
-            </TextBox>
+            <Button x:Name="AddBtn" Grid.Column="1" Content="&#xE710;" FontFamily="Segoe MDL2 Assets" Width="42" Height="36" Margin="10,0,0,0" FontSize="20" Padding="0" Style="{StaticResource PrimaryBtnStyle}" ToolTip="הוספת משימה מפורטת"/>
           </Grid>
         </Grid>
       </Border>
@@ -1640,13 +2256,23 @@ $script:MainXaml = @'
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
-            <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <TextBlock Text="רשימת משימות" FontSize="14" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-          <Button x:Name="FiltToday" Grid.Column="1" Content="היום" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
-          <Button x:Name="FiltAll" Grid.Column="2" Content="הכל" Style="{StaticResource FilterStyle}"/>
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <TextBlock Text="רשימת משימות" FontSize="14" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            <Button x:Name="SearchToggleBtn" Content="&#xE721;" FontFamily="Segoe MDL2 Assets" Width="30" Height="30" Margin="8,0,0,0" FontSize="14" Padding="0" Style="{StaticResource FilterStyle}" ToolTip="חיפוש במשימות (Ctrl+F)"/>
+          </StackPanel>
+          <TextBlock x:Name="FilterSummary" Grid.Column="1" FontSize="11.5" Foreground="#6B7280" VerticalAlignment="Center"/>
         </Grid>
-        <TextBlock x:Name="FilterSummary" FontSize="11.5" Foreground="#9CA3AF" Margin="2,5,0,0"/>
+        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+          <Button x:Name="FiltToday" Content="היום" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
+          <Button x:Name="FiltTomorrow" Content="מחר" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
+          <Button x:Name="FiltWeek" Content="השבוע" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
+          <Button x:Name="FiltAll" Content="הכל" Style="{StaticResource FilterStyle}"/>
+        </StackPanel>
+        <Grid x:Name="SearchWrap" Margin="0,8,0,0" Visibility="Collapsed">
+          <TextBox x:Name="SearchBox" Margin="34,0,0,0" FontSize="13" Padding="10,7" BorderBrush="#D1D5DB" VerticalContentAlignment="Center" FlowDirection="RightToLeft"/>
+          <Button x:Name="SearchClearBtn" Width="26" Height="26" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="4,0,0,0" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="12" Padding="0" Style="{StaticResource IconBtnStyle}" ToolTip="ניקוי חיפוש" Visibility="Collapsed"/>
+        </Grid>
       </StackPanel>
 
       <Grid Grid.Row="4" Margin="14,0,14,10">
@@ -1674,7 +2300,17 @@ $script:MainXaml = @'
           </ListBox.ItemContainerStyle>
           <ListBox.ItemTemplate>
             <DataTemplate>
-              <Border CornerRadius="12" Background="#FFFFFF" BorderBrush="#E5E7EB" BorderThickness="1" Padding="10,9">
+              <Border CornerRadius="12" BorderBrush="#E5E7EB" BorderThickness="1" Padding="12,10" ToolTip="גרירה לסידור מחדש">
+                <Border.Style>
+                  <Style TargetType="Border">
+                    <Setter Property="Background" Value="#FFFFFF"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding IsDone}" Value="True">
+                        <Setter Property="Background" Value="#F6F7F9"/>
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Border.Style>
                 <Border.Effect>
                   <DropShadowEffect BlurRadius="12" ShadowDepth="2" Opacity="0.07" Color="#000000"/>
                 </Border.Effect>
@@ -1685,24 +2321,36 @@ $script:MainXaml = @'
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                   </Grid.ColumnDefinitions>
-                  <CheckBox IsChecked="{Binding IsDone, Mode=OneWay}" Width="22" Height="22" VerticalAlignment="Center" Margin="2,0,10,0"/>
+                  <CheckBox IsChecked="{Binding IsDone, Mode=OneWay}" Style="{StaticResource TaskCheckStyle}" VerticalAlignment="Center" Margin="2,0,12,0" ToolTip="סימון משימה כהושלמה"/>
                   <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Title}" FontSize="13.5" FontWeight="SemiBold" Foreground="#111827" TextWrapping="Wrap"/>
+                    <TextBlock Text="{Binding Title}" FontSize="13.5" FontWeight="SemiBold" TextWrapping="Wrap">
+                      <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                          <Setter Property="Foreground" Value="#111827"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsDone}" Value="True">
+                              <Setter Property="TextDecorations" Value="Strikethrough"/>
+                              <Setter Property="Foreground" Value="#9CA3AF"/>
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </TextBlock.Style>
+                    </TextBlock>
                     <TextBlock Text="{Binding Description}" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="{Binding DescVisibility}"/>
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                       <Border Background="#EEF2FF" CornerRadius="10" Padding="8,2">
                         <TextBlock Text="{Binding RepeatDisplay}" FontSize="10.5" Foreground="#4F46E5"/>
                       </Border>
-                      <TextBlock Text="&#x1F514;" FontSize="10.5" Margin="6,1,0,0" Visibility="{Binding BellVisibility}" ToolTip="מפעילה התראה"/>
+                      <TextBlock Text="&#xEA8F;" FontFamily="Segoe MDL2 Assets" FontSize="11" Margin="6,1,0,0" Visibility="{Binding BellVisibility}" ToolTip="מפעילה התראה"/>
                     </StackPanel>
                   </StackPanel>
-                  <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="8,0,8,0" HorizontalAlignment="Center">
+                  <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="10,0,10,0" HorizontalAlignment="Center" MinWidth="58">
                     <TextBlock Text="{Binding TimeDisplay}" FontSize="13" FontWeight="Bold" Foreground="{Binding TimeBrush}" HorizontalAlignment="Center"/>
                     <TextBlock Text="{Binding TimeLeftText}" FontSize="11" Foreground="{Binding TimeLeftBrush}" HorizontalAlignment="Center" Margin="0,2,0,0"/>
                   </StackPanel>
                   <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="EditCardBtn" Content="&#x270E;" Width="28" Height="28" FontSize="12" Style="{StaticResource IconBtnStyle}" ToolTip="עריכה"/>
-                    <Button x:Name="DelCardBtn" Content="&#x2715;" Width="28" Height="28" FontSize="11" Margin="3,0,0,0" Foreground="#EF4444" Style="{StaticResource IconBtnStyle}" ToolTip="מחיקה"/>
+                    <Button x:Name="EditCardBtn" Content="&#xE70F;" FontFamily="Segoe MDL2 Assets" Width="28" Height="28" FontSize="14" Padding="0" Style="{StaticResource IconBtnStyle}" ToolTip="עריכה"/>
+                    <Button x:Name="DelCardBtn" Content="&#xE74D;" FontFamily="Segoe MDL2 Assets" Width="28" Height="28" FontSize="14" Padding="0" Margin="3,0,0,0" Foreground="#EF4444" Style="{StaticResource IconBtnStyle}" ToolTip="מחיקה"/>
                   </StackPanel>
                 </Grid>
               </Border>
@@ -1712,16 +2360,32 @@ $script:MainXaml = @'
         <StackPanel x:Name="EmptyMsg" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center">
           <TextBlock Text="🎉" FontSize="40" HorizontalAlignment="Center"/>
           <TextBlock Text="אין כאן משימות" FontSize="17" FontWeight="SemiBold" Foreground="#6B7280" HorizontalAlignment="Center" Margin="0,8,0,0"/>
-          <TextBlock Text="הוסיפו משימה חדשה והתחילו לתכנן את היום" FontSize="12.5" Foreground="#9CA3AF" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+          <TextBlock Text="הוסיפו משימה חדשה והתחילו לתכנן את היום" FontSize="12.5" Foreground="#6B7280" HorizontalAlignment="Center" Margin="0,4,0,0"/>
         </StackPanel>
       </Grid>
 
       <Border Grid.Row="5" Margin="14,0,14,10" Padding="4,8,4,4" BorderBrush="#E5E7EB" BorderThickness="0,1,0,0">
         <StackPanel>
-          <TextBlock Text="התוכנה רצה במגש המערכת - לחיצה על ✕ סוגרת אותה למגש" FontSize="11" Foreground="#9CA3AF" TextWrapping="Wrap"/>
-          <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right"/>
+          <TextBlock x:Name="TrayHint" Text="התוכנה פועלת ברקע במגש המערכת · לחיצה על ✕ ממזערת למגש" FontSize="11" Foreground="#6B7280" TextWrapping="Wrap"/>
+          <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+          <CheckBox x:Name="StartMinCheck" Content="התחל ממוזער למגש" FontSize="12" Foreground="#374151" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+          <CheckBox x:Name="FullscreenToastsCheck" Content="הצג הודעות גם במסך מלא" FontSize="12" Foreground="#374151" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
         </StackPanel>
       </Border>
+
+      <Grid x:Name="DlgOverlay" Grid.RowSpan="6" Visibility="Collapsed" Background="Transparent">
+        <Border Background="#66000000"/>
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
+                      HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
+          <Border x:Name="DlgCard" Background="#FFFFFF" CornerRadius="14" BorderBrush="#E5E7EB" BorderThickness="1"
+                  MaxWidth="310" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="14">
+            <Grid>
+              <StackPanel x:Name="DlgContent" Margin="18,16,18,16"/>
+              <StackPanel x:Name="DlgMsgContent" Margin="18,16,18,16" Visibility="Collapsed" Background="#FFFFFF"/>
+            </Grid>
+          </Border>
+        </ScrollViewer>
+      </Grid>
     </Grid>
   </Border>
 </Window>
@@ -1792,6 +2456,9 @@ function New-TrayIcon {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $openItem = New-Object System.Windows.Forms.ToolStripMenuItem('פתיחת התוכנה')
     $openItem.Add_Click({ Show-MainWindow })
+    $updateItem = New-Object System.Windows.Forms.ToolStripMenuItem('בדיקת עדכונים')
+    $updateItem.Add_Click({ Start-UpdateCheck -Manual })
+    $menu.Items.Add($updateItem) > $null
     $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem('יציאה')
     $exitItem.Add_Click({ Exit-App })
     $menu.Items.Add($openItem) > $null
@@ -1806,6 +2473,7 @@ function Exit-App {
     if ($script:Exiting) { return }
     $script:Exiting = $true
     try { Save-Tasks } catch {}
+    try { Save-Settings } catch {}
     try { $script:Tray.Visible = $false; $script:Tray.Dispose() } catch {}
     try {
         if ($null -ne $script:Window -and $script:Window.IsLoaded) {
@@ -1817,6 +2485,7 @@ function Exit-App {
 
 function Init-App {
     New-SharedStyles
+    Load-Settings
     Ensure-SoundFile
     Ensure-SuccessSound
     $script:App = [System.Windows.Application]::New()
@@ -1833,8 +2502,12 @@ function Init-App {
 
     $script:QuickBox = $win.FindName('QuickBox')
     $script:SearchBox = $win.FindName('SearchBox')
+    $script:SearchWrap = $win.FindName('SearchWrap')
+    $script:SearchClearBtn = $win.FindName('SearchClearBtn')
     $script:AddBtn = $win.FindName('AddBtn')
     $script:FiltToday = $win.FindName('FiltToday')
+    $script:FiltTomorrow = $win.FindName('FiltTomorrow')
+    $script:FiltWeek = $win.FindName('FiltWeek')
     $script:FiltAll = $win.FindName('FiltAll')
     $script:TaskList = $win.FindName('TaskList')
     $script:EmptyMsg = $win.FindName('EmptyMsg')
@@ -1845,15 +2518,22 @@ function Init-App {
     $script:HeroHint = $win.FindName('HeroHint')
     $script:FilterSummary = $win.FindName('FilterSummary')
     $script:AutoStartCheck = $win.FindName('AutoStartCheck')
+    $script:StartMinCheck = $win.FindName('StartMinCheck')
+    $script:FullscreenToastsCheck = $win.FindName('FullscreenToastsCheck')
     $script:TopDate = $win.FindName('TopDate')
+    $script:SearchToggleBtn = $win.FindName('SearchToggleBtn')
+    $script:DlgOverlay = $win.FindName('DlgOverlay')
+    $script:DlgContent = $win.FindName('DlgContent')
+    $script:DlgMsgContent = $win.FindName('DlgMsgContent')
+    $script:SoundBtn = $win.FindName('SoundBtn')
     $minBtn = $win.FindName('MinBtn')
     $closeBtn = $win.FindName('CloseBtn')
 
     $script:SearchBox.Text = ''
     $script:SearchBox.ToolTip = 'חיפוש בין המשימות לפי שם או תיאור'
+    $script:SearchWrap.Visibility = 'Collapsed'
     $script:QuickBox.ToolTip = 'הוספה מהירה: כתבו משימה, אופציונלי עם שעה (לדוגמה: שיחת טלפון 09:30) ולחצו Enter'
     $script:QuickHint = $win.FindName('QuickHint')
-    $script:SearchHint = $win.FindName('SearchHint')
 
     $today = Get-Date
     $he = New-Object System.Globalization.CultureInfo('he-IL')
@@ -1861,7 +2541,23 @@ function Init-App {
 
     $addHandler = [System.Windows.RoutedEventHandler]{ param($s, $e) Handle-ListClick $s $e }
     $script:TaskList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $addHandler)
+    Enable-ListDragReorder
 
+    function Update-SoundButton {
+        if ($script:SoundEnabled) {
+            $script:SoundBtn.Content = [string][char]0xE767
+            $script:SoundBtn.ToolTip = 'צליל התראות: מופעל'
+        } else {
+            $script:SoundBtn.Content = [string][char]0xE74F
+            $script:SoundBtn.ToolTip = 'צליל התראות: כבוי'
+        }
+    }
+    Update-SoundButton
+    $script:SoundBtn.Add_Click({
+        $script:SoundEnabled = -not $script:SoundEnabled
+        Update-SoundButton
+        Save-Settings
+    })
     $minBtn.Add_Click({ $script:Window.WindowState = 'Minimized' })
     $closeBtn.Add_Click({ $script:Window.Hide() })
     $script:AddBtn.Add_Click({ Show-TaskDialog $null })
@@ -1869,45 +2565,98 @@ function Init-App {
         if ($_.Key -eq 'Enter') { $_.Handled = $true; Add-QuickTask }
     })
     $script:SearchBox.Add_TextChanged({
-        $script:SearchHint.Visibility = if ($script:SearchBox.Text.Length -gt 0) { 'Collapsed' } else { 'Visible' }
+        $script:SearchClearBtn.Visibility = if ($script:SearchBox.Text.Length -gt 0) { 'Visible' } else { 'Collapsed' }
         Refresh-List
+    })
+    $script:SearchBox.Add_KeyDown({
+        if ($_.Key -eq 'Escape') {
+            $_.Handled = $true
+            $script:SearchWrap.Visibility = 'Collapsed'
+            $script:SearchBox.Text = ''
+            Refresh-List
+        }
+    })
+    $script:SearchClearBtn.Add_Click({
+        $script:SearchBox.Text = ''
+        $script:SearchBox.Focus()
+    })
+    $script:SearchToggleBtn.Add_Click({
+        if ($script:SearchWrap.Visibility -eq 'Collapsed') {
+            $script:SearchWrap.Visibility = 'Visible'
+            $script:SearchBox.Focus()
+        } else {
+            $script:SearchWrap.Visibility = 'Collapsed'
+            $script:SearchBox.Text = ''
+            Refresh-List
+        }
+    })
+    $win.Add_KeyDown({
+        if ($_.Key -eq 'F' -and ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) {
+            $_.Handled = $true
+            if ($script:SearchWrap.Visibility -eq 'Collapsed') { $script:SearchWrap.Visibility = 'Visible' }
+            $script:SearchBox.Focus()
+        }
+        elseif ($script:DlgOverlay.Visibility -eq 'Visible') {
+            if ($_.Key -eq 'Escape') {
+                $_.Handled = $true
+                if ($script:DlgMsgContent.Visibility -eq 'Visible') {
+                    $script:DlgResult = 'no'
+                    $script:DlgMsgContent.Visibility = 'Collapsed'
+                    if (-not $script:DlgMsgWasOpen) { $script:DlgOverlay.Visibility = 'Collapsed' }
+                    if ($null -ne $script:DlgFrame) { $script:DlgFrame.Continue = $false; $script:DlgFrame = $null }
+                } else {
+                    Close-DialogOverlay
+                }
+            }
+            elseif ($_.Key -eq 'Enter' -and ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) {
+                $_.Handled = $true
+                if ($script:DlgMsgContent.Visibility -ne 'Visible' -and $null -ne $script:DlgSaveAction) {
+                    & $script:DlgSaveAction
+                }
+            }
+        }
     })
     $script:QuickBox.Add_TextChanged({
         $script:QuickHint.Visibility = if ($script:QuickBox.Text.Length -gt 0) { 'Collapsed' } else { 'Visible' }
     })
 
     function Update-FilterButtons {
-        $todayOn = ($script:FiltToday.Tag -eq 'on')
-        if ($todayOn) {
-            $script:FiltToday.Background = Get-Brush '#4F46E5'
-            $script:FiltToday.Foreground = Get-Brush '#FFFFFF'
-            $script:FiltAll.Background = Get-Brush '#FFFFFF'
-            $script:FiltAll.Foreground = Get-Brush '#374151'
-        } else {
-            $script:FiltToday.Background = Get-Brush '#FFFFFF'
-            $script:FiltToday.Foreground = Get-Brush '#374151'
-            $script:FiltAll.Background = Get-Brush '#4F46E5'
-            $script:FiltAll.Foreground = Get-Brush '#FFFFFF'
+        $map = @{
+            'today' = $script:FiltToday
+            'tomorrow' = $script:FiltTomorrow
+            'week' = $script:FiltWeek
+            'all' = $script:FiltAll
+        }
+        foreach ($k in $map.Keys) {
+            if ($k -eq $script:Filter) {
+                $map[$k].Background = Get-Brush '#4F46E5'
+                $map[$k].Foreground = Get-Brush '#FFFFFF'
+            } else {
+                $map[$k].Background = Get-Brush '#FFFFFF'
+                $map[$k].Foreground = Get-Brush '#374151'
+            }
         }
     }
-    $script:FiltToday.Tag = 'on'
+    $script:Filter = 'today'
     Update-FilterButtons
-    $script:FiltToday.Add_Click({
-        $script:FiltToday.Tag = 'on'
-        $script:FiltAll.Tag = 'off'
-        Update-FilterButtons
-        Refresh-List
-    })
-    $script:FiltAll.Add_Click({
-        $script:FiltToday.Tag = 'off'
-        $script:FiltAll.Tag = 'on'
-        Update-FilterButtons
-        Refresh-List
-    })
+    $script:FiltToday.Add_Click({ $script:Filter = 'today'; Update-FilterButtons; Refresh-List })
+    $script:FiltTomorrow.Add_Click({ $script:Filter = 'tomorrow'; Update-FilterButtons; Refresh-List })
+    $script:FiltWeek.Add_Click({ $script:Filter = 'week'; Update-FilterButtons; Refresh-List })
+    $script:FiltAll.Add_Click({ $script:Filter = 'all'; Update-FilterButtons; Refresh-List })
 
     $autoOn = Test-Path -LiteralPath (Get-StartupShortcut)
     $script:AutoStartCheck.IsChecked = $autoOn
     $script:AutoStartCheck.Add_Click({ Set-AutoStart ($script:AutoStartCheck.IsChecked -eq $true) })
+    $script:StartMinCheck.IsChecked = $script:StartMinimized
+    $script:StartMinCheck.Add_Click({
+        $script:StartMinimized = ($script:StartMinCheck.IsChecked -eq $true)
+        Save-Settings
+    })
+    $script:FullscreenToastsCheck.IsChecked = $script:ShowToastsFullscreen
+    $script:FullscreenToastsCheck.Add_Click({
+        $script:ShowToastsFullscreen = ($script:FullscreenToastsCheck.IsChecked -eq $true)
+        Save-Settings
+    })
 
     $win.Add_Closing({
         param($s, $e)
@@ -1918,7 +2667,7 @@ function Init-App {
     })
 
     Load-Tasks
-    Initialize-Notified
+    $missed = @(Initialize-Notified)
     Refresh-List
 
     $tickTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -1941,7 +2690,12 @@ function Init-App {
     $win.Left = [double]$wa.Left
     $win.Top = [double]$wa.Bottom - $win.Height
 
-    $win.Show()
+    $hint = $win.FindName('TrayHint')
+    if ($null -ne $hint) { $hint.Text = $hint.Text + " · גרסה $($script:AppVersion)" }
+    Start-UpdateCheck
+
+    if (-not $script:StartMinimized) { $win.Show() }
+    if ($missed.Count -gt 0) { Show-MissedToast $missed }
     $script:App.Run()
 }
 

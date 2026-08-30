@@ -1,5 +1,6 @@
 # personal task data - not published
 tasks.json
+settings.json
 
 # build artifacts (published via Releases instead)
 DailyTasks-Setup.exe
