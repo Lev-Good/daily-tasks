@@ -57,7 +57,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.4'
+$script:AppVersion = '1.4.5'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -136,8 +136,20 @@ function Save-Tasks {
     try {
         # Keep the full completion history so the streak counter is never cut short.
         $json = $script:Tasks | ConvertTo-Json -Depth 8
-        [System.IO.File]::WriteAllText($script:DataFile, $json, (New-Object System.Text.UTF8Encoding($false)))
-    } catch { Write-Log ('Save-Tasks: ' + $_.Exception.Message) }
+        if ([string]::IsNullOrWhiteSpace($json)) { $json = '[]' }
+        # Atomic write: write to a temp file then swap it in, so a crash or forced
+        # close never leaves tasks.json truncated (0 bytes).
+        $tmp = $script:DataFile + '.tmp'
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $script:DataFile) {
+            [System.IO.File]::Replace($tmp, $script:DataFile, $null)
+        } else {
+            [System.IO.File]::Move($tmp, $script:DataFile)
+        }
+    } catch {
+        try { [System.IO.File]::WriteAllText($script:DataFile, $json, (New-Object System.Text.UTF8Encoding($false))) } catch {}
+        Write-Log ('Save-Tasks: ' + $_.Exception.Message)
+    }
 }
 
 function Load-Settings {
@@ -155,7 +167,13 @@ function Save-Settings {
     try {
         $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen }
         $json = $s | ConvertTo-Json
-        [System.IO.File]::WriteAllText($script:SettingsFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+        $tmp = $script:SettingsFile + '.tmp'
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $script:SettingsFile) {
+            [System.IO.File]::Replace($tmp, $script:SettingsFile, $null)
+        } else {
+            [System.IO.File]::Move($tmp, $script:SettingsFile)
+        }
     } catch { Write-Log ('Save-Settings: ' + $_.Exception.Message) }
 }
 
@@ -1003,7 +1021,10 @@ function Celebrate-Confetti([int]$count, [string]$text, [switch]$Dim) {
 
 function Build-ToastWindow($data) {
     $win = New-Object System.Windows.Window
-    if ($null -ne $script:Window) { $win.Owner = $script:Window }
+    # Only set an owner once the main window is actually visible; when the app
+    # starts minimized-to-tray the main window is not shown yet, and assigning an
+    # owner to a not-yet-shown window throws and drops the missed task toast.
+    if ($null -ne $script:Window -and $script:Window.IsVisible) { $win.Owner = $script:Window }
     $win.WindowStyle = 'None'
     $win.AllowsTransparency = $true
     $win.Background = [System.Windows.Media.Brushes]::Transparent
@@ -1959,7 +1980,7 @@ $script:MainXaml = @'
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="משימות יומיות"
-        Width="360" Height="700" MinWidth="320" MinHeight="500"
+        Width="368" Height="700" MinWidth="340" MinHeight="500"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         WindowStartupLocation="Manual" ResizeMode="CanResize"
         FlowDirection="RightToLeft"
@@ -2023,11 +2044,25 @@ $script:MainXaml = @'
         <Setter.Value>
           <ControlTemplate TargetType="CheckBox">
             <Grid Width="26" Height="26">
-              <Ellipse x:Name="bg" Fill="Transparent"/>
+              <Ellipse x:Name="bg" Fill="Transparent" RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                  <ScaleTransform x:Name="bgScale" ScaleX="1" ScaleY="1"/>
+                </Ellipse.RenderTransform>
+              </Ellipse>
               <TextBlock x:Name="glyph" Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="16"
                          Foreground="#C4CBD4" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Grid>
             <ControlTemplate.Triggers>
+              <EventTrigger RoutedEvent="ToggleButton.Checked">
+                <EventTrigger.Actions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="bgScale" Storyboard.TargetProperty="ScaleX" From="1" To="0.72" Duration="0:0:0.08" AutoReverse="True"/>
+                      <DoubleAnimation Storyboard.TargetName="bgScale" Storyboard.TargetProperty="ScaleY" From="1" To="0.76" Duration="0:0:0.08" AutoReverse="True"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </EventTrigger.Actions>
+              </EventTrigger>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="glyph" Property="Foreground" Value="#8B93A3"/>
               </Trigger>
@@ -2163,7 +2198,10 @@ $script:MainXaml = @'
     </Style>
   </Window.Resources>
 
-  <Border CornerRadius="14" Background="#F7F8FC" BorderBrush="#E5E7EB" BorderThickness="1" Padding="0">
+  <Border CornerRadius="16" Background="#F2F3F7" BorderBrush="#E6E8EF" BorderThickness="1" Padding="0">
+    <Border.Effect>
+      <DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.10" Color="#3B3F5C"/>
+    </Border.Effect>
     <Grid>
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
@@ -2191,13 +2229,11 @@ $script:MainXaml = @'
           <Button x:Name="MinBtn" Content="&#xE921;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="0,0,5,0" FontSize="14" Padding="0" Style="{StaticResource FilterStyle}" ToolTip="מזעור"/>
           <Button x:Name="CloseBtn" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" FontSize="14" Padding="0" Foreground="#6B7280" Style="{StaticResource FilterStyle}" ToolTip="סגירה למגש"/>
         </StackPanel>
-      </Grid>
-
-      <Border Grid.Row="1" Margin="16,0,16,14" CornerRadius="16" Padding="20,16">
+      </Grid>          <Border Grid.Row="1" Margin="16,0,16,14" CornerRadius="16" Padding="20,16" BorderBrush="#E6E8EF" BorderThickness="1">
         <Border.Background>
           <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#6366F1" Offset="0"/>
-            <GradientStop Color="#8B5CF6" Offset="1"/>
+            <GradientStop Color="#FAF9FF" Offset="0"/>
+            <GradientStop Color="#F2F3FA" Offset="1"/>
           </LinearGradientBrush>
         </Border.Background>
         <Grid>
@@ -2207,33 +2243,33 @@ $script:MainXaml = @'
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <TextBlock x:Name="TopDate" Text="" FontSize="12" Foreground="#C7D2FE" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="TopDate" Text="" FontSize="12" Foreground="#7C8191" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
           <Grid Grid.Row="1" Margin="0,6,0,0">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <StackPanel>
-              <TextBlock Text="היום" FontSize="12.5" Foreground="#C7D2FE" FontWeight="SemiBold"/>
-              <TextBlock x:Name="HeroText" Text="0 מתוך 0 הושלמו" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
-              <TextBlock x:Name="HeroStreak" Text="" FontSize="12" Foreground="#C7D2FE" Margin="0,3,0,0"/>
+              <TextBlock Text="היום" FontSize="12.5" Foreground="#7C8191" FontWeight="SemiBold"/>
+              <TextBlock x:Name="HeroText" Text="0 מתוך 0 הושלמו" FontSize="22" FontWeight="Bold" Foreground="#171B26" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="HeroStreak" Text="" FontSize="12" Foreground="#7C8191" Margin="0,3,0,0"/>
             </StackPanel>
-            <TextBlock x:Name="HeroPct" Grid.Column="1" Text="0%" FontSize="36" FontWeight="ExtraBold" Foreground="#FFFFFF" VerticalAlignment="Center" Opacity="0.92"/>
+            <TextBlock x:Name="HeroPct" Grid.Column="1" Text="0%" FontSize="36" FontWeight="ExtraBold" Foreground="#4F46E5" VerticalAlignment="Center" Opacity="0.95"/>
           </Grid>
           <Grid Grid.Row="2" Margin="0,12,0,0">
-            <Border Background="#40FFFFFF" CornerRadius="6" Height="12"/>
+            <Border Background="#E6E7F2" CornerRadius="6" Height="12"/>
             <ProgressBar x:Name="HeroBar" Height="12" Minimum="0" Maximum="100" Value="0">
               <ProgressBar.Template>
                 <ControlTemplate TargetType="ProgressBar">
                   <Grid>
-                    <Border x:Name="PART_Track" Background="#40FFFFFF" CornerRadius="6"/>
-                    <Border x:Name="PART_Indicator" Background="#FFFFFF" CornerRadius="6" HorizontalAlignment="Left"/>
+                    <Border x:Name="PART_Track" Background="#E6E7F2" CornerRadius="6"/>
+                    <Border x:Name="PART_Indicator" Background="#4F46E5" CornerRadius="6" HorizontalAlignment="Left"/>
                   </Grid>
                 </ControlTemplate>
               </ProgressBar.Template>
             </ProgressBar>
           </Grid>
-          <TextBlock x:Name="HeroHint" Grid.Row="3" Text="הוסיפו משימה ותתחילו לתכנן את היום" FontSize="12.5" Foreground="#E0E7FF" Margin="0,9,0,0" TextWrapping="Wrap"/>
+          <TextBlock x:Name="HeroHint" Grid.Row="3" Text="הוסיפו משימה ותתחילו לתכנן את היום" FontSize="12.5" Foreground="#6B7280" Margin="0,9,0,0" TextWrapping="Wrap"/>
         </Grid>
       </Border>
 
@@ -2278,12 +2314,14 @@ $script:MainXaml = @'
           </StackPanel>
           <TextBlock x:Name="FilterSummary" Grid.Column="1" FontSize="11.5" Foreground="#6B7280" VerticalAlignment="Center"/>
         </Grid>
-        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-          <Button x:Name="FiltToday" Content="היום" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
-          <Button x:Name="FiltTomorrow" Content="מחר" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
-          <Button x:Name="FiltWeek" Content="השבוע" Margin="0,0,6,0" Style="{StaticResource FilterStyle}"/>
-          <Button x:Name="FiltAll" Content="הכל" Style="{StaticResource FilterStyle}"/>
-        </StackPanel>
+        <Border Background="#FFFFFF" BorderBrush="#E6E8EF" BorderThickness="1" CornerRadius="10" Padding="3" Margin="0,8,0,0" HorizontalAlignment="Right">
+          <StackPanel Orientation="Horizontal">
+            <Button x:Name="FiltToday" Content="היום" Margin="0,0,2,0" MinWidth="54" Style="{StaticResource FilterStyle}"/>
+            <Button x:Name="FiltTomorrow" Content="מחר" Margin="0,0,2,0" MinWidth="54" Style="{StaticResource FilterStyle}"/>
+            <Button x:Name="FiltWeek" Content="השבוע" Margin="0,0,2,0" MinWidth="54" Style="{StaticResource FilterStyle}"/>
+            <Button x:Name="FiltAll" Content="הכל" MinWidth="54" Style="{StaticResource FilterStyle}"/>
+          </StackPanel>
+        </Border>
         <Grid x:Name="SearchWrap" Margin="0,8,0,0" Visibility="Collapsed">
           <TextBox x:Name="SearchBox" Margin="34,0,0,0" FontSize="13" Padding="10,7" BorderBrush="#D1D5DB" VerticalContentAlignment="Center" FlowDirection="RightToLeft"/>
           <Button x:Name="SearchClearBtn" Width="26" Height="26" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="4,0,0,0" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="12" Padding="0" Style="{StaticResource IconBtnStyle}" ToolTip="ניקוי חיפוש" Visibility="Collapsed"/>
@@ -2353,8 +2391,8 @@ $script:MainXaml = @'
                     </TextBlock>
                     <TextBlock Text="{Binding Description}" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="{Binding DescVisibility}"/>
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                      <Border Background="#EEF2FF" CornerRadius="10" Padding="8,2">
-                        <TextBlock Text="{Binding RepeatDisplay}" FontSize="10.5" Foreground="#4F46E5"/>
+                      <Border Background="#F0F1F5" CornerRadius="7" Padding="8,2">
+                        <TextBlock Text="{Binding RepeatDisplay}" FontSize="10.5" Foreground="#5B6472"/>
                       </Border>
                       <TextBlock Text="&#xEA8F;" FontFamily="Segoe MDL2 Assets" FontSize="11" Margin="6,1,0,0" Visibility="{Binding BellVisibility}" ToolTip="מפעילה התראה"/>
                     </StackPanel>
@@ -2373,7 +2411,7 @@ $script:MainXaml = @'
           </ListBox.ItemTemplate>
         </ListBox>
         <StackPanel x:Name="EmptyMsg" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center">
-          <TextBlock Text="🎉" FontSize="40" HorizontalAlignment="Center"/>
+          <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="46" Foreground="#C9CCD6" HorizontalAlignment="Center"/>
           <TextBlock Text="אין כאן משימות" FontSize="17" FontWeight="SemiBold" Foreground="#6B7280" HorizontalAlignment="Center" Margin="0,8,0,0"/>
           <TextBlock Text="הוסיפו משימה חדשה והתחילו לתכנן את היום" FontSize="12.5" Foreground="#6B7280" HorizontalAlignment="Center" Margin="0,4,0,0"/>
         </StackPanel>
@@ -2770,6 +2808,37 @@ function Init-App {
     $hint = $win.FindName('TrayHint')
     if ($null -ne $hint) { $hint.Text = $hint.Text + " · גרסה $($script:AppVersion)" }
     Start-UpdateCheck
+
+    $win.Add_Loaded({
+        $root = $win.Content
+        if ($null -eq $root -or $root.Tag -eq 'EntranceDone') { return }
+        $root.Tag = 'EntranceDone'
+        try {
+            $t = New-Object System.Windows.Media.ScaleTransform(0.98, 0.98)
+            $root.RenderTransform = $t
+            $root.RenderTransformOrigin = New-Object System.Windows.Point(0.5, 0.5)
+            $root.Opacity = 0
+            $op = New-Object System.Windows.Media.Animation.DoubleAnimation(0, 1, [TimeSpan]::FromMilliseconds(180))
+            $op.EasingFunction = New-Object System.Windows.Media.Animation.QuadraticEase
+            $op.EasingFunction.EasingMode = 'EaseOut'
+            $root.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $op)
+            $ease = New-Object System.Windows.Media.Animation.QuadraticEase
+            $ease.EasingMode = 'EaseOut'
+            $scx = New-Object System.Windows.Media.Animation.DoubleAnimation(0.98, 1, [TimeSpan]::FromMilliseconds(220))
+            $scy = New-Object System.Windows.Media.Animation.DoubleAnimation(0.98, 1, [TimeSpan]::FromMilliseconds(220))
+            $scx.EasingFunction = $ease; $scy.EasingFunction = $ease
+            $t.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $scx)
+            $t.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $scy)
+            # Failsafe: never let the window stay invisible if the fade somehow stalls.
+            $fs = New-Object System.Windows.Threading.DispatcherTimer
+            $fs.Interval = [TimeSpan]::FromMilliseconds(500)
+            $fs.Add_Tick({
+                $script:Window.Content.Opacity = 1
+                $fs.Stop()
+            })
+            $fs.Start()
+        } catch {}
+    })
 
     if (-not $script:StartMinimized) { $win.Show() }
     if ($missed.Count -gt 0) { Show-MissedToast $missed }
