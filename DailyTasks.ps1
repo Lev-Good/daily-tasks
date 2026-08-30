@@ -57,7 +57,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.1'
+$script:AppVersion = '1.4.2'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -677,30 +677,12 @@ function Show-TaskDialog($existing) {
     Update-RepeatRows
     $repeatBox.Add_SelectionChanged({ Update-RepeatRows })
 
-    $outer.Children.Add($fieldsPanel) > $null
-
-    $descLbl = New-Object System.Windows.Controls.TextBlock
-    $descLbl.Text = 'תיאור (אופציונלי)'
-    $descLbl.FontSize = 13
-    $descLbl.FontWeight = 'SemiBold'
-    $descLbl.Foreground = Get-Brush '#374151'
-    $descLbl.Margin = New-Object System.Windows.Thickness(0, 10, 0, 2)
-    $outer.Children.Add($descLbl) > $null
-
-    $descBox = New-Object System.Windows.Controls.TextBox
-    $descBox.FontSize = 13
-    $descBox.Padding = New-Object System.Windows.Thickness(10, 8, 10, 8)
-    $descBox.VerticalContentAlignment = 'Center'
-    $descBox.ToolTip = 'פרט נוסף על המשימה (מוצג ברשימה ובהתראה)'
-    if ($null -ne $existing) { $descBox.Text = [string]$existing.Description }
-    $outer.Children.Add($descBox) > $null
-
     $rowsLabel = New-Object System.Windows.Controls.TextBlock
     $rowsLabel.Text = 'משימות לביצוע'
     $rowsLabel.FontSize = 14
     $rowsLabel.FontWeight = 'SemiBold'
     $rowsLabel.Foreground = Get-Brush '#374151'
-    $rowsLabel.Margin = New-Object System.Windows.Thickness(0, 6, 0, 0)
+    $rowsLabel.Margin = New-Object System.Windows.Thickness(0, 2, 0, 0)
     $outer.Children.Add($rowsLabel) > $null
 
     $rowsPanel = New-Object System.Windows.Controls.StackPanel
@@ -719,6 +701,8 @@ function Show-TaskDialog($existing) {
     $addRowBtn.HorizontalAlignment = 'Left'
     $addRowBtn.Add_Click({ Add-DialogRow })
     $outer.Children.Add($addRowBtn) > $null
+
+    $outer.Children.Add($fieldsPanel) > $null
 
     $btnBar = New-Object System.Windows.Controls.StackPanel
     $btnBar.Orientation = 'Horizontal'
@@ -793,7 +777,6 @@ function Show-TaskDialog($existing) {
                 }
             }
             $t.Title = $titles[$i]
-            $t.Description = if ($i -eq 0) { $descBox.Text.Trim() } else { '' }
             $t.Time = $timeStr
             $t.Repeat = $repeat
             if ($repeat -eq 'Weekly') { $t.Days = @($selected) }
@@ -2101,6 +2084,7 @@ $script:MainXaml = @'
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#F3F4F6"/></Trigger>
               <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/><Setter TargetName="bd" Property="BorderThickness" Value="1.5"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -2121,6 +2105,7 @@ $script:MainXaml = @'
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#4338CA"/></Trigger>
               <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#3730A3"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#A5B4FC"/><Setter TargetName="bd" Property="BorderThickness" Value="1.5"/></Trigger>
               <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.5"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -2141,6 +2126,30 @@ $script:MainXaml = @'
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
               <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#D1D5DB"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/><Setter TargetName="bd" Property="BorderThickness" Value="1.5"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="ToggleBtnStyle" TargetType="ToggleButton">
+      <Setter Property="Foreground" Value="#374151"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Padding" Value="14,6"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#F3F4F6"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
+              <Trigger Property="IsChecked" Value="True"><Setter TargetName="bd" Property="Background" Value="#E0E7FF"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/><Setter TargetName="bd" Property="BorderThickness" Value="1.5"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -2166,7 +2175,7 @@ $script:MainXaml = @'
         </Grid.ColumnDefinitions>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,0">
           <Border Width="30" Height="30" CornerRadius="9" Background="#EEF2FF" VerticalAlignment="Center" Margin="0,0,8,0">
-            <TextBlock Text="&#xE9B4;" FontFamily="Segoe MDL2 Assets" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Image x:Name="AppIconImg" Width="18" Height="18" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
           </Border>
           <TextBlock Text="משימות יומיות" FontSize="16" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
@@ -2246,7 +2255,7 @@ $script:MainXaml = @'
                 </TextBox.Style>
               </TextBox>
             </Grid>
-            <Button x:Name="AddBtn" Grid.Column="1" Content="&#xE710;" FontFamily="Segoe MDL2 Assets" Width="42" Height="36" Margin="10,0,0,0" FontSize="20" Padding="0" Style="{StaticResource PrimaryBtnStyle}" ToolTip="הוספת משימה מפורטת"/>
+            <Button x:Name="AddBtn" Grid.Column="1" Content="&#xE710;" FontFamily="Segoe MDL2 Assets" Width="36" Height="36" Margin="10,0,0,0" FontSize="15" Padding="0" IsTabStop="True" Style="{StaticResource PrimaryBtnStyle}" ToolTip="הוספת משימה מפורטת"/>
           </Grid>
         </Grid>
       </Border>
@@ -2365,12 +2374,23 @@ $script:MainXaml = @'
       </Grid>
 
       <Border Grid.Row="5" Margin="14,0,14,10" Padding="4,8,4,4" BorderBrush="#E5E7EB" BorderThickness="0,1,0,0">
-        <StackPanel>
-          <TextBlock x:Name="TrayHint" Text="התוכנה פועלת ברקע במגש המערכת · לחיצה על ✕ ממזערת למגש" FontSize="11" Foreground="#6B7280" TextWrapping="Wrap"/>
-          <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
-          <CheckBox x:Name="StartMinCheck" Content="התחל ממוזער למגש" FontSize="12" Foreground="#374151" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
-          <CheckBox x:Name="FullscreenToastsCheck" Content="הצג הודעות גם במסך מלא" FontSize="12" Foreground="#374151" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
-        </StackPanel>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="TrayHint" Text="התוכנה פועלת ברקע במגש המערכת · לחיצה על ✕ ממזערת למגש" FontSize="11" Foreground="#6B7280" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          <ToggleButton x:Name="SettingsBtn" Grid.Column="1" Content="&#xE713;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="8,0,0,0" FontSize="15" Padding="0" Background="#FFFFFF" Foreground="#374151" BorderThickness="0" Cursor="Hand" Style="{StaticResource ToggleBtnStyle}" ToolTip="הגדרות"/>
+          <Popup x:Name="SettingsPopup" Grid.ColumnSpan="2" Placement="Bottom" AllowsTransparency="True" StaysOpen="False" IsOpen="False">
+            <Border Background="#FFFFFF" CornerRadius="12" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16,12" MinWidth="230" Margin="0,6,0,0">
+              <StackPanel>
+                <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="#374151" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+                <CheckBox x:Name="StartMinCheck" Content="התחל ממוזער למגש" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+                <CheckBox x:Name="FullscreenToastsCheck" Content="הצג הודעות גם במסך מלא" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+              </StackPanel>
+            </Border>
+          </Popup>
+        </Grid>
       </Border>
 
       <Grid x:Name="DlgOverlay" Grid.RowSpan="6" Visibility="Collapsed" Background="Transparent">
@@ -2438,6 +2458,20 @@ function New-WpfIcon {
         $ms.Dispose()
         $icon.Dispose()
         return $bmp
+    } catch { return $null }
+}
+
+function New-WinIcon {
+    # Taskbar/window icon built from the .ico via an HICON - the reliable way
+    # for WPF windows (a plain BitmapFrame often renders as a generic icon).
+    $icoPath = Join-Path $PSScriptRoot 'DailyTasks.ico'
+    if (-not (Test-Path -LiteralPath $icoPath)) { return $null }
+    try {
+        $icon = New-Object System.Drawing.Icon($icoPath)
+        try {
+            $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($icon.Handle, [System.Windows.Int32Rect]::Empty, $null)
+            return $src
+        } finally { $icon.Dispose() }
     } catch { return $null }
 }
 
@@ -2517,17 +2551,29 @@ function Init-App {
     $script:HeroStreak = $win.FindName('HeroStreak')
     $script:HeroHint = $win.FindName('HeroHint')
     $script:FilterSummary = $win.FindName('FilterSummary')
-    $script:AutoStartCheck = $win.FindName('AutoStartCheck')
-    $script:StartMinCheck = $win.FindName('StartMinCheck')
-    $script:FullscreenToastsCheck = $win.FindName('FullscreenToastsCheck')
     $script:TopDate = $win.FindName('TopDate')
     $script:SearchToggleBtn = $win.FindName('SearchToggleBtn')
     $script:DlgOverlay = $win.FindName('DlgOverlay')
     $script:DlgContent = $win.FindName('DlgContent')
     $script:DlgMsgContent = $win.FindName('DlgMsgContent')
     $script:SoundBtn = $win.FindName('SoundBtn')
+    $script:SettingsBtn = $win.FindName('SettingsBtn')
+    $script:SettingsPopup = $win.FindName('SettingsPopup')
     $minBtn = $win.FindName('MinBtn')
     $closeBtn = $win.FindName('CloseBtn')
+    $script:AppIconImg = $win.FindName('AppIconImg')
+
+    # The settings checkboxes live inside the settings popup (its own namescope),
+    # so they are resolved through the popup itself.
+    $script:AutoStartCheck = $script:SettingsPopup.FindName('AutoStartCheck')
+    $script:StartMinCheck = $script:SettingsPopup.FindName('StartMinCheck')
+    $script:FullscreenToastsCheck = $script:SettingsPopup.FindName('FullscreenToastsCheck')
+    $script:SettingsPopup.PlacementTarget = $script:SettingsBtn
+    $script:SettingsBtn.Add_Click({
+        if ($script:SettingsBtn.IsChecked) { $script:SettingsPopup.IsOpen = $true }
+        else { $script:SettingsPopup.IsOpen = $false }
+    })
+    $script:SettingsPopup.Add_Closed({ $script:SettingsBtn.IsChecked = $false })
 
     $script:SearchBox.Text = ''
     $script:SearchBox.ToolTip = 'חיפוש בין המשימות לפי שם או תיאור'
@@ -2561,6 +2607,9 @@ function Init-App {
     $minBtn.Add_Click({ $script:Window.WindowState = 'Minimized' })
     $closeBtn.Add_Click({ $script:Window.Hide() })
     $script:AddBtn.Add_Click({ Show-TaskDialog $null })
+    $script:AddBtn.Add_KeyDown({
+        if ($_.Key -eq 'Enter') { $_.Handled = $true; Show-TaskDialog $null }
+    })
     $script:QuickBox.Add_KeyDown({
         if ($_.Key -eq 'Enter') { $_.Handled = $true; Add-QuickTask }
     })
@@ -2685,7 +2734,11 @@ function Init-App {
         $showTimer.Start()
     }
 
-    $win.Icon = New-WpfIcon
+    $win.Icon = New-WinIcon
+    if ($null -ne $script:AppIconImg) {
+        $iconSrc = New-WpfIcon
+        if ($null -ne $iconSrc) { $script:AppIconImg.Source = $iconSrc }
+    }
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
     $win.Left = [double]$wa.Left
     $win.Top = [double]$wa.Bottom - $win.Height
