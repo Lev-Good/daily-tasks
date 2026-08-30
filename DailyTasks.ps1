@@ -57,7 +57,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.2'
+$script:AppVersion = '1.4.3'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -530,7 +530,7 @@ function Add-DialogRow {
     $rowsPanel.Children.Add($row) > $null
 }
 
-function Show-TaskDialog($existing) {
+function Show-TaskDialog($existing, [string]$initialTitle = '', [string]$initialTime = '') {
     if ($null -eq $script:DlgContent) { return }
     $script:DlgContent.Children.Clear()
     $script:DlgResult = $null
@@ -571,7 +571,9 @@ function Show-TaskDialog($existing) {
     }
 
     $timeBox = New-Object System.Windows.Controls.TextBox
-    $timeBox.Text = if ($null -ne $existing) { $existing.Time } else { (Get-Date).AddMinutes(30).ToString('HH:mm') }
+    if ($null -ne $existing) { $timeBox.Text = $existing.Time }
+    elseif ($initialTime -and (Get-TimeSpanSafe $initialTime)) { $timeBox.Text = $initialTime }
+    else { $timeBox.Text = (Get-Date).AddMinutes(30).ToString('HH:mm') }
     $timeBox.Width = 100
     $timeBox.FontSize = 15
     $timeBox.Padding = New-Object System.Windows.Thickness(8, 6, 8, 6)
@@ -806,6 +808,8 @@ function Show-TaskDialog($existing) {
         $r0 = $rowsPanel.Children[0]
         $r0.Children[0].Text = $existing.Title
         $r0.Children[1].Visibility = 'Collapsed'
+    } elseif ($initialTitle) {
+        $rowsPanel.Children[0].Children[0].Text = $initialTitle
     }
 
     $script:DlgOverlay.Visibility = 'Visible'
@@ -2606,9 +2610,27 @@ function Init-App {
     })
     $minBtn.Add_Click({ $script:Window.WindowState = 'Minimized' })
     $closeBtn.Add_Click({ $script:Window.Hide() })
-    $script:AddBtn.Add_Click({ Show-TaskDialog $null })
+    function Open-DetailedDialog {
+        $text = $script:QuickBox.Text.Trim()
+        $title = $text
+        $time = ''
+        $tm = [regex]::Match($text, '\b(\d{1,2}:\d{2})\b')
+        if ($tm.Success) {
+            $cand = $tm.Value
+            if (Get-TimeSpanSafe $cand) {
+                $time = $cand
+                $title = ($text.Substring(0, $tm.Index) + ' ' + $text.Substring($tm.Index + $tm.Length)) -replace '\s+', ' '
+                $title = $title.Trim()
+                if (-not $title) { $title = $text }
+            }
+        }
+        # The text moves into the detailed dialog - the quick box starts clean.
+        $script:QuickBox.Clear()
+        Show-TaskDialog $null $title $time
+    }
+    $script:AddBtn.Add_Click({ Open-DetailedDialog })
     $script:AddBtn.Add_KeyDown({
-        if ($_.Key -eq 'Enter') { $_.Handled = $true; Show-TaskDialog $null }
+        if ($_.Key -eq 'Enter') { $_.Handled = $true; Open-DetailedDialog }
     })
     $script:QuickBox.Add_KeyDown({
         if ($_.Key -eq 'Enter') { $_.Handled = $true; Add-QuickTask }
