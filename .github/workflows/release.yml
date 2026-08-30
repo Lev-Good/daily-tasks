@@ -36,8 +36,9 @@ jobs:
           foreach ($f in $files) {
             Copy-Item -LiteralPath $f -Destination $staging -Force
           }
-          # The packaged tasks.json is always the empty template - never user data.
-          Copy-Item -LiteralPath 'DailyTasks-Setup/tasks.template.json' -Destination (Join-Path $staging 'tasks.json') -Force
+          # Build sources: launcher + manifest + installer
+          Copy-Item -LiteralPath 'Launcher.cs' -Destination $staging -Force
+          Copy-Item -LiteralPath 'app.manifest' -Destination $staging -Force
           Copy-Item -LiteralPath 'DailyTasks-Setup/SFX.cs' -Destination $staging -Force
           Copy-Item -LiteralPath 'DailyTasks-Setup/build_setup.ps1' -Destination $staging -Force
 
@@ -67,12 +68,13 @@ jobs:
             'README.txt',
             'setup.ps1',
             'sound.wav',
-            'success.wav',
-            'tasks.json'
+            'success.wav'
           )
           foreach ($f in $files) {
             Copy-Item -LiteralPath (Join-Path $staging $f) -Destination $portable -Force
           }
+          # The packaged tasks.json is always the empty template - never user data.
+          Copy-Item -LiteralPath 'DailyTasks-Setup/tasks.template.json' -Destination (Join-Path $portable 'tasks.json') -Force
           Compress-Archive -Path (Join-Path $portable '*') -DestinationPath (Join-Path $env:RUNNER_TEMP 'DailyTasks-Setup.zip') -CompressionLevel Optimal
 
       - name: Prepare release notes

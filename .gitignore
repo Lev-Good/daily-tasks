@@ -9,3 +9,18 @@ DailyTasks-Setup.zip
 # temp / logs
 *.log
 install_error.txt
+
+# local build payload copies inside DailyTasks-Setup/ (synced from repo root)
+DailyTasks-Setup/DailyTasks.ps1
+DailyTasks-Setup/DailyTasks.cmd
+DailyTasks-Setup/DailyTasks.exe
+DailyTasks-Setup/DailyTasks.ico
+DailyTasks-Setup/install.cmd
+DailyTasks-Setup/uninstall.cmd
+DailyTasks-Setup/uninstall.ps1
+DailyTasks-Setup/README.txt
+DailyTasks-Setup/setup.ps1
+DailyTasks-Setup/sound.wav
+DailyTasks-Setup/success.wav
+DailyTasks-Setup/Launcher.cs
+DailyTasks-Setup/app.manifest

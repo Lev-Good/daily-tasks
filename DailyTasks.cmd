@@ -1,2 +1,2 @@
 @echo off
-start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0DailyTasks.ps1"
+start "" "%~dp0DailyTasks.exe"
