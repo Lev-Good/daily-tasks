@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>משימות יומיות — תזכורות חכמות ל-Windows</title>
+<meta name="description" content="משימות יומיות — אפליקציית תזכורות משימות בעברית ל-Windows. הורדה חינם, עדכונים אוטומטיים.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='8' y='8' width='84' height='84' rx='20' fill='%2310B981'/><path d='M28 52 l16 16 l30 -32' stroke='white' stroke-width='12' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<style>
+  :root {
+    --bg: #f6f8fb;
+    --card: #ffffff;
+    --ink: #111827;
+    --muted: #5b6572;
+    --green: #10b981;
+    --green-dark: #0d9f6e;
+    --border: #e5e9f0;
+    --radius: 16px;
+    --shadow: 0 10px 30px rgba(17, 24, 39, 0.08);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Heebo", "Arial", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--green-dark); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+
+  header {
+    padding: 28px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 18px; }
+  .brand svg { width: 36px; height: 36px; }
+  .brand small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
+  .gh-link { font-size: 14px; color: var(--muted); }
+
+  .hero {
+    text-align: center;
+    padding: 56px 0 40px;
+  }
+  .hero h1 { font-size: 40px; font-weight: 800; letter-spacing: -0.5px; }
+  .hero p.sub { color: var(--muted); font-size: 17px; max-width: 560px; margin: 14px auto 32px; }
+  .badge {
+    display: inline-block;
+    background: #e7f8f1;
+    color: var(--green-dark);
+    border: 1px solid #bfecdb;
+    border-radius: 999px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 22px;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--green);
+    color: #fff;
+    font-size: 19px;
+    font-weight: 700;
+    padding: 16px 38px;
+    border-radius: 14px;
+    box-shadow: 0 8px 22px rgba(16, 185, 129, 0.35);
+    transition: transform 0.12s ease, background 0.12s ease;
+  }
+  .btn:hover { background: var(--green-dark); text-decoration: none; transform: translateY(-1px); }
+  .btn .ic { font-size: 22px; }
+  .alt-links { margin-top: 16px; font-size: 14px; color: var(--muted); }
+  .alt-links a { color: var(--muted); }
+
+  section { padding: 28px 0; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 28px;
+  }
+  h2 { font-size: 22px; margin-bottom: 18px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .feat { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .feat .ic { font-size: 26px; }
+  .feat h3 { font-size: 15px; margin: 8px 0 4px; }
+  .feat p { font-size: 13.5px; color: var(--muted); }
+
+  ol.steps { padding-right: 20px; }
+  ol.steps li { margin-bottom: 10px; font-size: 15px; }
+  ol.steps code {
+    background: #eef1f6;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 13px;
+    direction: ltr;
+    display: inline-block;
+  }
+  .note {
+    background: #fff8e6;
+    border: 1px solid #f3e3b3;
+    border-radius: 12px;
+    padding: 14px 18px;
+    font-size: 14px;
+    margin-top: 16px;
+  }
+
+  #releasenotes { white-space: pre-line; font-size: 14px; color: var(--ink); max-height: 300px; overflow-y: auto; }
+  #releasenotes .dim { color: var(--muted); font-size: 13px; }
+
+  footer { text-align: center; color: var(--muted); font-size: 13px; padding: 40px 0 30px; }
+
+  @media (max-width: 600px) {
+    .hero h1 { font-size: 30px; }
+    .hero { padding-top: 36px; }
+    .btn { width: 100%; justify-content: center; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 100 100" aria-hidden="true"><rect x="8" y="8" width="84" height="84" rx="20" fill="#10B981"/><path d="M28 52 l16 16 l30 -32" stroke="#fff" stroke-width="12" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>משימות יומיות<small>תזכורות משימות ל-Windows</small></span>
+    </div>
+    <a class="gh-link" href="https://github.com/Lev-Good/daily-tasks" target="_blank" rel="noopener">קוד פתוח ב-GitHub ↗</a>
+  </header>
+
+  <div class="hero">
+    <h1>אף משימה לא תישכח</h1>
+    <p class="sub">אפליקציית תזכורות משימות בעברית ל-Windows: התראות חכמות, חזרות יומיות/שבועיות, וכל המשימות שלכם — במקום אחד.</p>
+    <div class="badge" id="verBadge">טוענים גרסה אחרונה…</div><br>
+    <a class="btn" href="https://github.com/Lev-Good/daily-tasks/releases/latest/download/DailyTasks-Setup.exe" id="dlBtn">
+      <span class="ic">⬇</span> הורדה ל-Windows
+    </a>
+    <div class="alt-links">
+      או <a href="https://github.com/Lev-Good/daily-tasks/releases" target="_blank" rel="noopener">עיינו בכל המהדורות</a> ·
+      <a href="https://github.com/Lev-Good/daily-tasks" target="_blank" rel="noopener">קוד המקור</a>
+    </div>
+  </div>
+
+  <section>
+    <div class="grid">
+      <div class="feat"><div class="ic">🔔</div><h3>התראות חכמות</h3><p>טוסטים יפים בזמן, צליל התראה, ותזכורות שמגיעות גם כשהתוכנה סגורה.</p></div>
+      <div class="feat"><div class="ic">🖥️</div><h3>מודע למסך מלא</h3><p>במסך מלא ההודעות לא מפריעות — ובהגדרות אפשר לשנות את זה.</p></div>
+      <div class="feat"><div class="ic">📅</div><h3>פילטרים חכמים</h3><p>היום, מחר, השבוע או הכל — תמיד תראו בדיוק מה צריך.</p></div>
+      <div class="feat"><div class="ic">🔄</div><h3>עדכונים אוטומטיים</h3><p>התוכנה בודקת גרסאות חדשות בעצמה ומתעדכנת בלי לאבד נתונים.</p></div>
+      <div class="feat"><div class="ic">✍️</div><h3>ניהול נוח</h3><p>גרירה לסידור, חיפוש מהיר (Ctrl+F), תיאור למשימה, וחזרות יומיות/שבועיות.</p></div>
+      <div class="feat"><div class="ic">🛡️</div><h3>נתונים אצלכם</h3><p>המשימות נשמרות מקומית במחשב שלכם, ואף פעם לא נמחקות בעדכון.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>התקנה</h2>
+      <ol class="steps">
+        <li>הורידו את <code>DailyTasks-Setup.exe</code> בכפתור למעלה.</li>
+        <li>הריצו את הקובץ — התוכנה מתקינה את עצמה ופותחת את החלון.</li>
+        <li>מהמגש (למטה-ימין ליד השעון) אפשר להפעיל הפעלה אוטומטית עם Windows.</li>
+      </ol>
+      <div class="note">
+        ⚠️ <strong>הערה:</strong> ייתכן ש-Windows יציג אזהרת SmartScreen כי הקובץ לא חתום בתעודה רשמית.
+        לחצו <strong>“מידע נוסף”</strong> ואז <strong>“הרץ בכל זאת”</strong> — הקובץ נבנה מהקוד הפתוח במאגר.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>מה חדש בגרסה האחרונה</h2>
+      <div id="releasenotes"><span class="dim">טוענים…</span></div>
+    </div>
+  </section>
+
+  <footer>
+    משימות יומיות · רישיון MIT · <a href="https://github.com/Lev-Good/daily-tasks" target="_blank" rel="noopener">github.com/Lev-Good/daily-tasks</a>
+  </footer>
+</div>
+
+<script>
+(function () {
+  // The download button always points at "releases/latest/download", which
+  // GitHub redirects to the newest release's asset - so it never goes stale.
+  // This script only enhances the page with the version number + release notes.
+  var badge = document.getElementById('verBadge');
+  var notes = document.getElementById('releasenotes');
+  var btn = document.getElementById('dlBtn');
+
+  fetch('https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest', {
+    headers: { 'Accept': 'application/vnd.github+json' }
+  })
+    .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+    .then(function (rel) {
+      var tag = rel.tag_name || 'אחרונה';
+      var date = rel.published_at ? new Date(rel.published_at).toLocaleDateString('he-IL') : '';
+      badge.textContent = 'גרסה אחרונה: ' + tag + (date ? ' · ' + date : '');
+      btn.title = 'הורדת הגרסה האחרונה (' + tag + ')';
+      var body = (rel.body || '').replace(/\r\n/g, '\n').trim();
+      if (body) {
+        notes.textContent = body;
+      } else {
+        notes.innerHTML = '<span class="dim">אין הערות שחרור לגרסה זו.</span>';
+      }
+    })
+    .catch(function () {
+      badge.textContent = 'גרסה אחרונה';
+      notes.innerHTML = '<span class="dim">לא ניתן היה לטעון את הערות השחרור כרגע.</span>';
+    });
+})();
+</script>
+</body>
+</html>
