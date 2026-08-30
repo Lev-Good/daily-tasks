@@ -39,6 +39,11 @@ $script:SoundEnabled = $true
 $script:StartMinimized = $false
 $script:ShowToastsFullscreen = $false
 $script:Filter = 'today'
+$script:ThemeMode = 'auto'
+$script:IsDark = $false
+$script:SurfaceCard = '#FFFFFF'
+$script:ThemeTokens = @{}
+$script:ResolvedMainXaml = $null
 $script:MissedShown = $false
 $script:Tasks = @()
 $script:Snoozed = @{}
@@ -57,7 +62,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.5'
+$script:AppVersion = '1.4.6'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -75,12 +80,61 @@ function Get-TodayStr {
     (Get-Date).ToString('yyyy-MM-dd')
 }
 
+$script:NeutralMap = @{
+    '#111827' = '#E7E9EF'; '#171B26' = '#E7E9EF'; '#374151' = '#C9CED9'; '#6B7280' = '#999FAE'
+    '#E5E7EB' = '#2E3341'; '#E6E8EF' = '#2E3341'; '#F3F4F6' = '#2B303D'; '#9CA3AF' = '#5A6274'
+    '#C7CBD1' = '#3A404E'; '#D1D5DB' = '#3A404E'; '#EEF2FF' = '#2A2F42'; '#E0E7FF' = '#2A2F42'
+}
+
 function Get-Brush([string]$hex) {
+    $key = $hex.ToUpper()
+    if ($script:IsDark -and $script:NeutralMap.ContainsKey($key)) { $hex = $script:NeutralMap[$key] }
     $hex = $hex.TrimStart('#')
     $r = [Convert]::ToByte($hex.Substring(0, 2), 16)
     $g = [Convert]::ToByte($hex.Substring(2, 2), 16)
     $b = [Convert]::ToByte($hex.Substring(4, 2), 16)
     return New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb($r, $g, $b))
+}
+
+function Resolve-ThemeXaml([string]$s) {
+    foreach ($k in $script:ThemeTokens.Keys) {
+        $s = $s.Replace('@' + $k + '@', $script:ThemeTokens[$k])
+    }
+    return $s
+}
+
+function Apply-Theme {
+    $mode = $script:ThemeMode
+    if ($mode -ne 'light' -and $mode -ne 'dark') { $mode = 'auto' }
+    if ($mode -eq 'auto') {
+        try {
+            $light = Get-ItemPropertyValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop
+            $script:IsDark = ($light -eq 0)
+        } catch { $script:IsDark = $false }
+    } else {
+        $script:IsDark = ($mode -eq 'dark')
+    }
+    if ($script:IsDark) {
+        $script:ThemeTokens = @{
+            'BG' = '#15171E'; 'CARD' = '#1F222B'; 'CARDDONE' = '#1A1D26'; 'BORDER' = '#2E3341'
+            'TEXT' = '#E7E9EF'; 'TEXT2' = '#C9CED9'; 'MUT' = '#999FAE'
+            'TINT' = '#2A2F42'; 'HERO1' = '#1E2330'; 'HERO2' = '#191D27'; 'TRACK' = '#333A49'
+            'PILL' = '#262B37'; 'GHOST' = '#363C4C'; 'HOVER' = '#2B303D'; 'HOVER2' = '#363C4B'
+            'THUMB' = '#3A404E'; 'THUMBH' = '#5A6274'; 'THUMBD' = '#6E7687'; 'INPUT' = '#15171E'
+            'ACCENT' = '#818CF8'
+        }
+    } else {
+        $script:ThemeTokens = @{
+            'BG' = '#F2F3F7'; 'CARD' = '#FFFFFF'; 'CARDDONE' = '#F6F7F9'; 'BORDER' = '#E6E8EF'
+            'TEXT' = '#111827'; 'TEXT2' = '#374151'; 'MUT' = '#6B7280'
+            'TINT' = '#EEF2FF'; 'HERO1' = '#FAF9FF'; 'HERO2' = '#F2F3FA'; 'TRACK' = '#E6E7F2'
+            'PILL' = '#F0F1F5'; 'GHOST' = '#C9CCD6'; 'HOVER' = '#F3F4F6'; 'HOVER2' = '#E5E7EB'
+            'THUMB' = '#C9CDD4'; 'THUMBH' = '#9CA3AF'; 'THUMBD' = '#6B7280'; 'INPUT' = '#FFFFFF'
+            'ACCENT' = '#4F46E5'
+        }
+    }
+    $script:SurfaceCard = $script:ThemeTokens['CARD']
+    $script:ResolvedMainXaml = Resolve-ThemeXaml $script:MainXaml
 }
 
 # Minimal error log for diagnostics (capped size)
@@ -159,13 +213,14 @@ function Load-Settings {
             if ($null -ne $s -and $null -ne $s.Sound) { $script:SoundEnabled = [bool]$s.Sound }
             if ($null -ne $s -and $null -ne $s.StartMinimized) { $script:StartMinimized = [bool]$s.StartMinimized }
             if ($null -ne $s -and $null -ne $s.ShowToastsFullscreen) { $script:ShowToastsFullscreen = [bool]$s.ShowToastsFullscreen }
+            if ($null -ne $s -and $null -ne $s.Theme) { $script:ThemeMode = [string]$s.Theme }
         } catch { Write-Log ('Load-Settings: ' + $_.Exception.Message) }
     }
 }
 
 function Save-Settings {
     try {
-        $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen }
+        $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen; Theme = [string]$script:ThemeMode }
         $json = $s | ConvertTo-Json
         $tmp = $script:SettingsFile + '.tmp'
         [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
@@ -1599,7 +1654,7 @@ function Get-StyleFromXaml([string]$xaml) {
 }
 
 function New-SharedStyles {
-    $script:PrimaryBtnStyle = Get-StyleFromXaml @'
+    $script:PrimaryBtnStyle = Get-StyleFromXaml (Resolve-ThemeXaml @'
 <Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="Button">
   <Setter Property="Foreground" Value="#FFFFFF"/>
   <Setter Property="FontWeight" Value="SemiBold"/>
@@ -1621,31 +1676,31 @@ function New-SharedStyles {
     </Setter.Value>
   </Setter>
 </Style>
-'@
-    $script:SecondaryBtnStyle = Get-StyleFromXaml @'
+'@)
+    $script:SecondaryBtnStyle = Get-StyleFromXaml (Resolve-ThemeXaml @'
 <Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="Button">
-  <Setter Property="Foreground" Value="#374151"/>
+  <Setter Property="Foreground" Value="@TEXT2@"/>
   <Setter Property="Cursor" Value="Hand"/>
   <Setter Property="BorderThickness" Value="1"/>
   <Setter Property="Padding" Value="14,7"/>
   <Setter Property="Template">
     <Setter.Value>
       <ControlTemplate TargetType="Button">
-        <Border x:Name="bd" Background="#FFFFFF" BorderBrush="#D1D5DB" CornerRadius="8" Padding="{TemplateBinding Padding}">
+        <Border x:Name="bd" Background="@CARD@" BorderBrush="@BORDER@" CornerRadius="8" Padding="{TemplateBinding Padding}">
           <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Border>
         <ControlTemplate.Triggers>
-          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#F3F4F6"/></Trigger>
-          <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER@"/></Trigger>
+          <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER2@"/></Trigger>
         </ControlTemplate.Triggers>
       </ControlTemplate>
     </Setter.Value>
   </Setter>
 </Style>
-'@
-    $script:IconBtnStyle = Get-StyleFromXaml @'
+'@)
+    $script:IconBtnStyle = Get-StyleFromXaml (Resolve-ThemeXaml @'
 <Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="Button">
-  <Setter Property="Foreground" Value="#6B7280"/>
+  <Setter Property="Foreground" Value="@MUT@"/>
   <Setter Property="Cursor" Value="Hand"/>
   <Setter Property="Background" Value="Transparent"/>
   <Setter Property="BorderThickness" Value="0"/>
@@ -1657,14 +1712,14 @@ function New-SharedStyles {
           <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Border>
         <ControlTemplate.Triggers>
-          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
-          <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#D1D5DB"/></Trigger>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER2@"/></Trigger>
+          <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER@"/></Trigger>
         </ControlTemplate.Triggers>
       </ControlTemplate>
     </Setter.Value>
   </Setter>
 </Style>
-'@
+'@)
 }
 
 function Test-NewerVersion([string]$tag) {
@@ -1990,9 +2045,9 @@ $script:MainXaml = @'
     <Style TargetType="TextBox">
       <Setter Property="FontSize" Value="14"/>
       <Setter Property="Padding" Value="10,7"/>
-      <Setter Property="BorderBrush" Value="#D1D5DB"/>
-      <Setter Property="Background" Value="#FFFFFF"/>
-      <Setter Property="Foreground" Value="#111827"/>
+      <Setter Property="BorderBrush" Value="@BORDER@"/>
+      <Setter Property="Background" Value="@INPUT@"/>
+      <Setter Property="Foreground" Value="@TEXT@"/>
       <Setter Property="BorderThickness" Value="1"/>
       <Setter Property="VerticalContentAlignment" Value="Center"/>
       <Setter Property="Template">
@@ -2002,7 +2057,7 @@ $script:MainXaml = @'
               <ScrollViewer x:Name="PART_ContentHost" Margin="2,1,2,1" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#9CA3AF"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="@THUMBH@"/></Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -2010,14 +2065,14 @@ $script:MainXaml = @'
       </Setter>
     </Style>
     <Style TargetType="CheckBox">
-      <Setter Property="Foreground" Value="#374151"/>
+      <Setter Property="Foreground" Value="@TEXT2@"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="VerticalContentAlignment" Value="Center"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="CheckBox">
             <StackPanel Orientation="Horizontal">
-              <Border x:Name="box" Width="20" Height="20" CornerRadius="6" Background="#FFFFFF" BorderBrush="#C7CBD1" BorderThickness="1.5" VerticalAlignment="Center">
+              <Border x:Name="box" Width="20" Height="20" CornerRadius="6" Background="@CARD@" BorderBrush="@BORDER@" BorderThickness="1.5" VerticalAlignment="Center">
                 <Path x:Name="check" Data="M 3,10.5 L 7,14.5 L 16,5.5" Stroke="#4F46E5" StrokeThickness="2.2"
                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
                       Visibility="Collapsed" FlowDirection="LeftToRight"/>
@@ -2026,7 +2081,7 @@ $script:MainXaml = @'
             </StackPanel>
             <ControlTemplate.Triggers>
               <Trigger Property="IsChecked" Value="True">
-                <Setter TargetName="box" Property="Background" Value="#EEF2FF"/>
+                <Setter TargetName="box" Property="Background" Value="@TINT@"/>
                 <Setter TargetName="box" Property="BorderBrush" Value="#4F46E5"/>
                 <Setter TargetName="check" Property="Visibility" Value="Visible"/>
               </Trigger>
@@ -2090,10 +2145,10 @@ $script:MainXaml = @'
                   <Thumb Focusable="False">
                     <Thumb.Template>
                       <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="thumb" Background="#C9CDD4" CornerRadius="5" Margin="2"/>
+                        <Border x:Name="thumb" Background="@THUMB@" CornerRadius="5" Margin="2"/>
                         <ControlTemplate.Triggers>
-                          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="thumb" Property="Background" Value="#9CA3AF"/></Trigger>
-                          <Trigger Property="IsDragging" Value="True"><Setter TargetName="thumb" Property="Background" Value="#6B7280"/></Trigger>
+                          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="thumb" Property="Background" Value="@THUMBH@"/></Trigger>
+                          <Trigger Property="IsDragging" Value="True"><Setter TargetName="thumb" Property="Background" Value="@THUMBD@"/></Trigger>
                         </ControlTemplate.Triggers>
                       </ControlTemplate>
                     </Thumb.Template>
@@ -2113,8 +2168,8 @@ $script:MainXaml = @'
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Background" Value="#FFFFFF"/>
-      <Setter Property="Foreground" Value="#374151"/>
+      <Setter Property="Background" Value="@CARD@"/>
+      <Setter Property="Foreground" Value="@TEXT2@"/>
       <Setter Property="Padding" Value="14,6"/>
       <Setter Property="Template">
         <Setter.Value>
@@ -2123,8 +2178,8 @@ $script:MainXaml = @'
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#F3F4F6"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER@"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER2@"/></Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/><Setter TargetName="bd" Property="BorderThickness" Value="1.5"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -2154,7 +2209,7 @@ $script:MainXaml = @'
       </Setter>
     </Style>
     <Style x:Key="IconBtnStyle" TargetType="Button">
-      <Setter Property="Foreground" Value="#6B7280"/>
+      <Setter Property="Foreground" Value="@MUT@"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="Padding" Value="6,4"/>
@@ -2165,8 +2220,8 @@ $script:MainXaml = @'
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#D1D5DB"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER2@"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER@"/></Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/><Setter TargetName="bd" Property="BorderThickness" Value="1.5"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -2174,10 +2229,10 @@ $script:MainXaml = @'
       </Setter>
     </Style>
     <Style x:Key="ToggleBtnStyle" TargetType="ToggleButton">
-      <Setter Property="Foreground" Value="#374151"/>
+      <Setter Property="Foreground" Value="@TEXT2@"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Background" Value="@CARD@"/>
       <Setter Property="FontSize" Value="13"/>
       <Setter Property="Padding" Value="14,6"/>
       <Setter Property="Template">
@@ -2187,9 +2242,9 @@ $script:MainXaml = @'
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#F3F4F6"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#E5E7EB"/></Trigger>
-              <Trigger Property="IsChecked" Value="True"><Setter TargetName="bd" Property="Background" Value="#E0E7FF"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER@"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="@HOVER2@"/></Trigger>
+              <Trigger Property="IsChecked" Value="True"><Setter TargetName="bd" Property="Background" Value="@TINT@"/></Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#4F46E5"/><Setter TargetName="bd" Property="BorderThickness" Value="1.5"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -2198,7 +2253,7 @@ $script:MainXaml = @'
     </Style>
   </Window.Resources>
 
-  <Border CornerRadius="16" Background="#F2F3F7" BorderBrush="#E6E8EF" BorderThickness="1" Padding="0">
+  <Border CornerRadius="16" Background="@BG@" BorderBrush="@BORDER@" BorderThickness="1" Padding="0">
     <Border.Effect>
       <DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.10" Color="#3B3F5C"/>
     </Border.Effect>
@@ -2218,22 +2273,22 @@ $script:MainXaml = @'
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,0">
-          <Border Width="30" Height="30" CornerRadius="9" Background="#EEF2FF" VerticalAlignment="Center" Margin="0,0,8,0">
+          <Border Width="30" Height="30" CornerRadius="9" Background="@TINT@" VerticalAlignment="Center" Margin="0,0,8,0">
             <Image x:Name="AppIconImg" Width="18" Height="18" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
           </Border>
-          <TextBlock Text="משימות יומיות" FontSize="16" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          <TextBlock Text="משימות יומיות" FontSize="16" FontWeight="Bold" Foreground="@TEXT@" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
           <Button x:Name="SoundBtn" Content="&#xE767;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="0,0,5,0" FontSize="15" Padding="0" Style="{StaticResource FilterStyle}" ToolTip="צליל התראות: מופעל"/>
           <Button x:Name="MinBtn" Content="&#xE921;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="0,0,5,0" FontSize="14" Padding="0" Style="{StaticResource FilterStyle}" ToolTip="מזעור"/>
-          <Button x:Name="CloseBtn" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" FontSize="14" Padding="0" Foreground="#6B7280" Style="{StaticResource FilterStyle}" ToolTip="סגירה למגש"/>
+          <Button x:Name="CloseBtn" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" FontSize="14" Padding="0" Foreground="@MUT@" Style="{StaticResource FilterStyle}" ToolTip="סגירה למגש"/>
         </StackPanel>
-      </Grid>          <Border Grid.Row="1" Margin="16,0,16,14" CornerRadius="16" Padding="20,16" BorderBrush="#E6E8EF" BorderThickness="1">
+      </Grid>          <Border Grid.Row="1" Margin="16,0,16,14" CornerRadius="16" Padding="20,16" BorderBrush="@BORDER@" BorderThickness="1">
         <Border.Background>
           <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#FAF9FF" Offset="0"/>
-            <GradientStop Color="#F2F3FA" Offset="1"/>
+            <GradientStop Color="@HERO1@" Offset="0"/>
+            <GradientStop Color="@HERO2@" Offset="1"/>
           </LinearGradientBrush>
         </Border.Background>
         <Grid>
@@ -2243,37 +2298,37 @@ $script:MainXaml = @'
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
-          <TextBlock x:Name="TopDate" Text="" FontSize="12" Foreground="#7C8191" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="TopDate" Text="" FontSize="12" Foreground="@MUT@" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
           <Grid Grid.Row="1" Margin="0,6,0,0">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <StackPanel>
-              <TextBlock Text="היום" FontSize="12.5" Foreground="#7C8191" FontWeight="SemiBold"/>
-              <TextBlock x:Name="HeroText" Text="0 מתוך 0 הושלמו" FontSize="22" FontWeight="Bold" Foreground="#171B26" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
-              <TextBlock x:Name="HeroStreak" Text="" FontSize="12" Foreground="#7C8191" Margin="0,3,0,0"/>
+              <TextBlock Text="היום" FontSize="12.5" Foreground="@MUT@" FontWeight="SemiBold"/>
+              <TextBlock x:Name="HeroText" Text="0 מתוך 0 הושלמו" FontSize="22" FontWeight="Bold" Foreground="@TEXT@" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="HeroStreak" Text="" FontSize="12" Foreground="@MUT@" Margin="0,3,0,0"/>
             </StackPanel>
-            <TextBlock x:Name="HeroPct" Grid.Column="1" Text="0%" FontSize="36" FontWeight="ExtraBold" Foreground="#4F46E5" VerticalAlignment="Center" Opacity="0.95"/>
+            <TextBlock x:Name="HeroPct" Grid.Column="1" Text="0%" FontSize="36" FontWeight="ExtraBold" Foreground="@ACCENT@" VerticalAlignment="Center" Opacity="0.95"/>
           </Grid>
           <Grid Grid.Row="2" Margin="0,12,0,0">
-            <Border Background="#E6E7F2" CornerRadius="6" Height="12"/>
+            <Border Background="@TRACK@" CornerRadius="6" Height="12"/>
             <ProgressBar x:Name="HeroBar" Height="12" Minimum="0" Maximum="100" Value="0">
               <ProgressBar.Template>
                 <ControlTemplate TargetType="ProgressBar">
                   <Grid>
-                    <Border x:Name="PART_Track" Background="#E6E7F2" CornerRadius="6"/>
+                    <Border x:Name="PART_Track" Background="@TRACK@" CornerRadius="6"/>
                     <Border x:Name="PART_Indicator" Background="#4F46E5" CornerRadius="6" HorizontalAlignment="Left"/>
                   </Grid>
                 </ControlTemplate>
               </ProgressBar.Template>
             </ProgressBar>
           </Grid>
-          <TextBlock x:Name="HeroHint" Grid.Row="3" Text="הוסיפו משימה ותתחילו לתכנן את היום" FontSize="12.5" Foreground="#6B7280" Margin="0,9,0,0" TextWrapping="Wrap"/>
+          <TextBlock x:Name="HeroHint" Grid.Row="3" Text="הוסיפו משימה ותתחילו לתכנן את היום" FontSize="12.5" Foreground="@MUT@" Margin="0,9,0,0" TextWrapping="Wrap"/>
         </Grid>
       </Border>
 
-      <Border Grid.Row="2" Margin="16,0,16,14" CornerRadius="12" Background="#FFFFFF" BorderBrush="#E5E7EB" BorderThickness="1" Padding="14">
+      <Border Grid.Row="2" Margin="16,0,16,14" CornerRadius="12" Background="@CARD@" BorderBrush="@BORDER@" BorderThickness="1" Padding="14">
         <Grid>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
@@ -2285,7 +2340,7 @@ $script:MainXaml = @'
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <Grid>
-              <TextBlock x:Name="QuickHint" Text="הוספה מהירה — כתבו משימה ולחצו Enter" FontSize="13" Foreground="#6B7280" VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False"/>
+              <TextBlock x:Name="QuickHint" Text="הוספה מהירה — כתבו משימה ולחצו Enter" FontSize="13" Foreground="@MUT@" VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False"/>
               <TextBox x:Name="QuickBox" FontSize="13" HorizontalAlignment="Stretch" Background="Transparent">
                 <TextBox.Style>
                   <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
@@ -2309,12 +2364,12 @@ $script:MainXaml = @'
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-            <TextBlock Text="רשימת משימות" FontSize="14" FontWeight="Bold" Foreground="#111827" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Text="רשימת משימות" FontSize="14" FontWeight="Bold" Foreground="@TEXT@" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             <Button x:Name="SearchToggleBtn" Content="&#xE721;" FontFamily="Segoe MDL2 Assets" Width="30" Height="30" Margin="8,0,0,0" FontSize="14" Padding="0" Style="{StaticResource FilterStyle}" ToolTip="חיפוש במשימות (Ctrl+F)"/>
           </StackPanel>
-          <TextBlock x:Name="FilterSummary" Grid.Column="1" FontSize="11.5" Foreground="#6B7280" VerticalAlignment="Center"/>
+          <TextBlock x:Name="FilterSummary" Grid.Column="1" FontSize="11.5" Foreground="@MUT@" VerticalAlignment="Center"/>
         </Grid>
-        <Border Background="#FFFFFF" BorderBrush="#E6E8EF" BorderThickness="1" CornerRadius="10" Padding="3" Margin="0,8,0,0" HorizontalAlignment="Right">
+        <Border Background="@CARD@" BorderBrush="@BORDER@" BorderThickness="1" CornerRadius="10" Padding="3" Margin="0,8,0,0" HorizontalAlignment="Right">
           <StackPanel Orientation="Horizontal">
             <Button x:Name="FiltToday" Content="היום" Margin="0,0,2,0" MinWidth="54" Style="{StaticResource FilterStyle}"/>
             <Button x:Name="FiltTomorrow" Content="מחר" Margin="0,0,2,0" MinWidth="54" Style="{StaticResource FilterStyle}"/>
@@ -2323,7 +2378,7 @@ $script:MainXaml = @'
           </StackPanel>
         </Border>
         <Grid x:Name="SearchWrap" Margin="0,8,0,0" Visibility="Collapsed">
-          <TextBox x:Name="SearchBox" Margin="34,0,0,0" FontSize="13" Padding="10,7" BorderBrush="#D1D5DB" VerticalContentAlignment="Center" FlowDirection="RightToLeft"/>
+          <TextBox x:Name="SearchBox" Margin="34,0,0,0" FontSize="13" Padding="10,7" BorderBrush="@BORDER@" VerticalContentAlignment="Center" FlowDirection="RightToLeft"/>
           <Button x:Name="SearchClearBtn" Width="26" Height="26" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="4,0,0,0" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="12" Padding="0" Style="{StaticResource IconBtnStyle}" ToolTip="ניקוי חיפוש" Visibility="Collapsed"/>
         </Grid>
       </StackPanel>
@@ -2353,13 +2408,13 @@ $script:MainXaml = @'
           </ListBox.ItemContainerStyle>
           <ListBox.ItemTemplate>
             <DataTemplate>
-              <Border CornerRadius="12" BorderBrush="#E5E7EB" BorderThickness="1" Padding="12,10" ToolTip="גרירה לסידור מחדש">
+              <Border CornerRadius="12" BorderBrush="@BORDER@" BorderThickness="1" Padding="12,10" ToolTip="גרירה לסידור מחדש">
                 <Border.Style>
                   <Style TargetType="Border">
-                    <Setter Property="Background" Value="#FFFFFF"/>
+                    <Setter Property="Background" Value="@CARD@"/>
                     <Style.Triggers>
                       <DataTrigger Binding="{Binding IsDone}" Value="True">
-                        <Setter Property="Background" Value="#F6F7F9"/>
+                        <Setter Property="Background" Value="@CARDDONE@"/>
                       </DataTrigger>
                     </Style.Triggers>
                   </Style>
@@ -2379,7 +2434,7 @@ $script:MainXaml = @'
                     <TextBlock Text="{Binding Title}" FontSize="13.5" FontWeight="SemiBold" TextWrapping="Wrap">
                       <TextBlock.Style>
                         <Style TargetType="TextBlock">
-                          <Setter Property="Foreground" Value="#111827"/>
+                          <Setter Property="Foreground" Value="@TEXT@"/>
                           <Style.Triggers>
                             <DataTrigger Binding="{Binding IsDone}" Value="True">
                               <Setter Property="TextDecorations" Value="Strikethrough"/>
@@ -2389,10 +2444,10 @@ $script:MainXaml = @'
                         </Style>
                       </TextBlock.Style>
                     </TextBlock>
-                    <TextBlock Text="{Binding Description}" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="{Binding DescVisibility}"/>
+                    <TextBlock Text="{Binding Description}" FontSize="12" Foreground="@MUT@" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="{Binding DescVisibility}"/>
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                      <Border Background="#F0F1F5" CornerRadius="7" Padding="8,2">
-                        <TextBlock Text="{Binding RepeatDisplay}" FontSize="10.5" Foreground="#5B6472"/>
+                      <Border Background="@PILL@" CornerRadius="7" Padding="8,2">
+                        <TextBlock Text="{Binding RepeatDisplay}" FontSize="10.5" Foreground="@MUT@"/>
                       </Border>
                       <TextBlock Text="&#xEA8F;" FontFamily="Segoe MDL2 Assets" FontSize="11" Margin="6,1,0,0" Visibility="{Binding BellVisibility}" ToolTip="מפעילה התראה"/>
                     </StackPanel>
@@ -2411,26 +2466,32 @@ $script:MainXaml = @'
           </ListBox.ItemTemplate>
         </ListBox>
         <StackPanel x:Name="EmptyMsg" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center">
-          <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="46" Foreground="#C9CCD6" HorizontalAlignment="Center"/>
-          <TextBlock Text="אין כאן משימות" FontSize="17" FontWeight="SemiBold" Foreground="#6B7280" HorizontalAlignment="Center" Margin="0,8,0,0"/>
-          <TextBlock Text="הוסיפו משימה חדשה והתחילו לתכנן את היום" FontSize="12.5" Foreground="#6B7280" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+          <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="46" Foreground="@GHOST@" HorizontalAlignment="Center"/>
+          <TextBlock Text="אין כאן משימות" FontSize="17" FontWeight="SemiBold" Foreground="@MUT@" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+          <TextBlock Text="הוסיפו משימה חדשה והתחילו לתכנן את היום" FontSize="12.5" Foreground="@MUT@" HorizontalAlignment="Center" Margin="0,4,0,0"/>
         </StackPanel>
       </Grid>
 
-      <Border Grid.Row="5" Margin="14,0,14,10" Padding="4,8,4,4" BorderBrush="#E5E7EB" BorderThickness="0,1,0,0">
+      <Border Grid.Row="5" Margin="14,0,14,10" Padding="4,8,4,4" BorderBrush="@BORDER@" BorderThickness="0,1,0,0">
         <Grid>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <TextBlock x:Name="TrayHint" Text="התוכנה פועלת ברקע במגש המערכת · לחיצה על ✕ ממזערת למגש" FontSize="11" Foreground="#6B7280" TextWrapping="Wrap" VerticalAlignment="Center"/>
-          <ToggleButton x:Name="SettingsBtn" Grid.Column="1" Content="&#xE713;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="8,0,0,0" FontSize="15" Padding="0" Background="#FFFFFF" Foreground="#374151" BorderThickness="0" Cursor="Hand" Style="{StaticResource ToggleBtnStyle}" ToolTip="הגדרות"/>
+          <TextBlock x:Name="TrayHint" Text="התוכנה פועלת ברקע במגש המערכת · לחיצה על ✕ ממזערת למגש" FontSize="11" Foreground="@MUT@" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          <ToggleButton x:Name="SettingsBtn" Grid.Column="1" Content="&#xE713;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Margin="8,0,0,0" FontSize="15" Padding="0" Background="@CARD@" Foreground="@TEXT2@" BorderThickness="0" Cursor="Hand" Style="{StaticResource ToggleBtnStyle}" ToolTip="הגדרות"/>
           <Popup x:Name="SettingsPopup" Grid.ColumnSpan="2" Placement="Bottom" AllowsTransparency="True" StaysOpen="False" IsOpen="False">
-            <Border Background="#FFFFFF" CornerRadius="12" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16,12" MinWidth="230" Margin="0,6,0,0">
+            <Border Background="@CARD@" CornerRadius="12" BorderBrush="@BORDER@" BorderThickness="1" Padding="16,12" MinWidth="250" Margin="0,6,0,0">
               <StackPanel>
-                <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="#374151" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
-                <CheckBox x:Name="StartMinCheck" Content="התחל ממוזער למגש" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
-                <CheckBox x:Name="FullscreenToastsCheck" Content="הצג הודעות גם במסך מלא" FontSize="12" Foreground="#374151" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+                <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="@TEXT2@" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+                <CheckBox x:Name="StartMinCheck" Content="התחל ממוזער למגש" FontSize="12" Foreground="@TEXT2@" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+                <CheckBox x:Name="FullscreenToastsCheck" Content="הצג הודעות גם במסך מלא" FontSize="12" Foreground="@TEXT2@" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+                <TextBlock Text="ערכת צבעים" FontSize="11.5" Margin="0,12,0,4" HorizontalAlignment="Right" FontWeight="SemiBold" Foreground="@MUT@"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                  <Button x:Name="ThemeAutoBtn" Content="אוטומטי" Padding="10,5" Margin="0,0,4,0" Style="{StaticResource FilterStyle}" ToolTip="מתעדכן אוטומטית לפי ערכת Windows"/>
+                  <Button x:Name="ThemeLightBtn" Content="בהיר" Padding="10,5" Margin="0,0,4,0" Style="{StaticResource FilterStyle}"/>
+                  <Button x:Name="ThemeDarkBtn" Content="כהה" Padding="10,5" Style="{StaticResource FilterStyle}"/>
+                </StackPanel>
               </StackPanel>
             </Border>
           </Popup>
@@ -2441,11 +2502,11 @@ $script:MainXaml = @'
         <Border Background="#66000000"/>
         <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
                       HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
-          <Border x:Name="DlgCard" Background="#FFFFFF" CornerRadius="14" BorderBrush="#E5E7EB" BorderThickness="1"
+          <Border x:Name="DlgCard" Background="@CARD@" CornerRadius="14" BorderBrush="@BORDER@" BorderThickness="1"
                   MaxWidth="310" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="14">
             <Grid>
               <StackPanel x:Name="DlgContent" Margin="18,16,18,16"/>
-              <StackPanel x:Name="DlgMsgContent" Margin="18,16,18,16" Visibility="Collapsed" Background="#FFFFFF"/>
+              <StackPanel x:Name="DlgMsgContent" Margin="18,16,18,16" Visibility="Collapsed" Background="@CARD@"/>
             </Grid>
           </Border>
         </ScrollViewer>
@@ -2562,15 +2623,16 @@ function Exit-App {
 }
 
 function Init-App {
-    New-SharedStyles
     Load-Settings
+    Apply-Theme
+    New-SharedStyles
     Ensure-SoundFile
     Ensure-SuccessSound
     $script:App = [System.Windows.Application]::New()
     $script:App.ShutdownMode = 'OnExplicitShutdown'
     $script:App.Add_Exit({ Save-Tasks })
 
-    $xamlBytes = [System.Text.Encoding]::UTF8.GetBytes($script:MainXaml)
+    $xamlBytes = [System.Text.Encoding]::UTF8.GetBytes($script:ResolvedMainXaml)
     $xamlStream = New-Object System.IO.MemoryStream
     $xamlStream.Write($xamlBytes, 0, $xamlBytes.Length)
     $xamlStream.Position = 0
@@ -2743,11 +2805,31 @@ function Init-App {
                 $map[$k].Background = Get-Brush '#4F46E5'
                 $map[$k].Foreground = Get-Brush '#FFFFFF'
             } else {
-                $map[$k].Background = Get-Brush '#FFFFFF'
+                $map[$k].Background = Get-Brush $script:SurfaceCard
                 $map[$k].Foreground = Get-Brush '#374151'
             }
         }
     }
+
+    function Update-ThemeButtons {
+        $map = @{ 'auto' = $script:ThemeAutoBtn; 'light' = $script:ThemeLightBtn; 'dark' = $script:ThemeDarkBtn }
+        foreach ($k in $map.Keys) {
+            if ($k -eq $script:ThemeMode) {
+                $map[$k].Background = Get-Brush '#4F46E5'
+                $map[$k].Foreground = Get-Brush '#FFFFFF'
+            } else {
+                $map[$k].Background = Get-Brush $script:SurfaceCard
+                $map[$k].Foreground = Get-Brush '#374151'
+            }
+        }
+    }
+    function Set-ThemeMode($mode) {
+        $script:ThemeMode = $mode
+        Save-Settings
+        Update-ThemeButtons
+        Show-MessageDialog 'נושא הצבעים יחול מההפעלה הבאה של התוכנה.' 'ערכת צבעים' | Out-Null
+    }
+
     $script:Filter = 'today'
     Update-FilterButtons
     $script:FiltToday.Add_Click({ $script:Filter = 'today'; Update-FilterButtons; Refresh-List })
@@ -2768,6 +2850,13 @@ function Init-App {
         $script:ShowToastsFullscreen = ($script:FullscreenToastsCheck.IsChecked -eq $true)
         Save-Settings
     })
+    $script:ThemeAutoBtn = $win.FindName('ThemeAutoBtn')
+    $script:ThemeLightBtn = $win.FindName('ThemeLightBtn')
+    $script:ThemeDarkBtn = $win.FindName('ThemeDarkBtn')
+    Update-ThemeButtons
+    $script:ThemeAutoBtn.Add_Click({ Set-ThemeMode 'auto' })
+    $script:ThemeLightBtn.Add_Click({ Set-ThemeMode 'light' })
+    $script:ThemeDarkBtn.Add_Click({ Set-ThemeMode 'dark' })
 
     $win.Add_Closing({
         param($s, $e)
