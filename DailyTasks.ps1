@@ -1,4 +1,4 @@
-﻿Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
 # Enable DPI awareness so the WPF window is crisp on high-DPI displays (must run before any window is created)
 try {
@@ -57,7 +57,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.3'
+$script:AppVersion = '1.4.4'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -1022,10 +1022,12 @@ function Build-ToastWindow($data) {
     $wrap.MaxWidth = 370
     $wrap.Padding = New-Object System.Windows.Thickness(18, 14, 18, 14)
     $shad = New-Object System.Windows.Media.Effects.DropShadowEffect
-    $shad.BlurRadius = 28
-    $shad.ShadowDepth = 6
+    # A soft, tight shadow: a large blur bleeds into the rounded corners and
+    # looks like gray wedges outside the card.
+    $shad.BlurRadius = 6
+    $shad.ShadowDepth = 3
     $shad.Direction = 90
-    $shad.Opacity = 0.28
+    $shad.Opacity = 0.12
     $shad.Color = [System.Windows.Media.Colors]::Black
     $wrap.Effect = $shad
 
