@@ -36,6 +36,10 @@ if (-not $mutex.WaitOne(0, $false)) {
 $script:DataFile = Join-Path $PSScriptRoot 'tasks.json'
 $script:SettingsFile = Join-Path $PSScriptRoot 'settings.json'
 $script:SoundEnabled = $true
+$script:NotifySound = 'chime'
+$script:NotifyVolume = 70
+$script:NotifyPlayer = $null
+$script:NotifyPlaying = $false
 $script:StartMinimized = $false
 $script:ShowToastsFullscreen = $false
 $script:Filter = 'today'
@@ -62,7 +66,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.6'
+$script:AppVersion = '1.4.7'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -214,13 +218,21 @@ function Load-Settings {
             if ($null -ne $s -and $null -ne $s.StartMinimized) { $script:StartMinimized = [bool]$s.StartMinimized }
             if ($null -ne $s -and $null -ne $s.ShowToastsFullscreen) { $script:ShowToastsFullscreen = [bool]$s.ShowToastsFullscreen }
             if ($null -ne $s -and $null -ne $s.Theme) { $script:ThemeMode = [string]$s.Theme }
+            if ($null -ne $s -and $null -ne $s.NotifySound) { $script:NotifySound = [string]$s.NotifySound }
+            if ($null -ne $s -and $null -ne $s.NotifyVolume) { $script:NotifyVolume = [int]$s.NotifyVolume }
         } catch { Write-Log ('Load-Settings: ' + $_.Exception.Message) }
     }
+    # Normalize loaded values against the available sound profiles.
+    try {
+        $ids = @(Get-SoundProfiles | ForEach-Object { $_.Id })
+        if ($ids -notcontains $script:NotifySound) { $script:NotifySound = 'chime' }
+    } catch { $script:NotifySound = 'chime' }
+    if ($script:NotifyVolume -lt 0 -or $script:NotifyVolume -gt 100) { $script:NotifyVolume = 70 }
 }
 
 function Save-Settings {
     try {
-        $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen; Theme = [string]$script:ThemeMode }
+        $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; NotifySound = [string]$script:NotifySound; NotifyVolume = [int]$script:NotifyVolume; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen; Theme = [string]$script:ThemeMode }
         $json = $s | ConvertTo-Json
         $tmp = $script:SettingsFile + '.tmp'
         [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
@@ -286,6 +298,27 @@ function Write-Chime([string]$path, [double[]]$freqs, [double[]]$durs) {
     } catch {}
 }
 
+# Sound profiles for notification alerts. Each profile is synthesized locally by
+# Write-Chime into sounds\<id>.wav - no external audio files are shipped or downloaded.
+# Playback goes through MediaPlayer (WPF) so the user-selected volume applies.
+function Get-SoundProfiles {
+    return @(
+        [pscustomobject]@{ Id = 'wind';      Name = 'רוח רגועה';   Freqs = @(523.25, 659.25, 783.99);            Durs = @(0.22, 0.22, 0.52) }
+        [pscustomobject]@{ Id = 'chime';     Name = 'פעמון עדין';  Freqs = @(783.99, 1046.5);                    Durs = @(0.25, 0.55) }
+        [pscustomobject]@{ Id = 'marimba';   Name = 'מרימבה';      Freqs = @(659.25, 880.0, 1174.66);            Durs = @(0.16, 0.16, 0.42) }
+        [pscustomobject]@{ Id = 'drops';     Name = 'טיפות מים';   Freqs = @(1174.66, 1567.98);                  Durs = @(0.14, 0.4) }
+        [pscustomobject]@{ Id = 'pulse';     Name = 'פעימה רכה';   Freqs = @(440.0, 554.37);                     Durs = @(0.18, 0.5) }
+        [pscustomobject]@{ Id = 'dream';     Name = 'חלום';        Freqs = @(587.33, 739.99, 880.0, 1174.66);    Durs = @(0.18, 0.18, 0.18, 0.5) }
+        [pscustomobject]@{ Id = 'sunrise';   Name = 'זריחה';       Freqs = @(523.25, 659.25, 987.77);            Durs = @(0.2, 0.2, 0.6) }
+        [pscustomobject]@{ Id = 'bells';     Name = 'צלילי פעמונים'; Freqs = @(1046.5, 1318.51, 1567.98);        Durs = @(0.13, 0.13, 0.45) }
+        [pscustomobject]@{ Id = 'bloom';     Name = 'פריחה';       Freqs = @(659.25, 783.99, 987.77);            Durs = @(0.18, 0.18, 0.55) }
+        [pscustomobject]@{ Id = 'horizon';   Name = 'אופק';        Freqs = @(440.0, 659.25, 880.0);              Durs = @(0.22, 0.22, 0.6) }
+        [pscustomobject]@{ Id = 'default';   Name = 'ברירת מחדל (ישנה)'; Freqs = @(880, 1318.51, 1567.98);       Durs = @(0.12, 0.22, 0.35) }
+        [pscustomobject]@{ Id = 'crystal';   Name = 'גביש';        Freqs = @(1318.51, 1760.0);                   Durs = @(0.12, 0.5) }
+        [pscustomobject]@{ Id = 'gentle';    Name = 'עדין מאוד';   Freqs = @(392.0, 523.25);                     Durs = @(0.25, 0.6) }
+    )
+}
+
 function Ensure-SoundFile {
     Write-Chime (Join-Path $PSScriptRoot 'sound.wav') @(880, 1318.51, 1567.98) @(0.12, 0.22, 0.35)
 }
@@ -308,13 +341,58 @@ function Play-WavFile([string]$path) {
     } catch {}
 }
 
-function Play-TaskSound {
-    $wav = Join-Path $PSScriptRoot 'sound.wav'
-    if (Test-Path -LiteralPath $wav) {
-        Play-WavFile $wav
-    } else {
+# Generates every known sound profile in sounds\ (new profiles from future versions
+# are created on demand here; the legacy sound.wav stays for the success chime).
+function Ensure-AllSounds {
+    try {
+        $dir = Join-Path $PSScriptRoot 'sounds'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        foreach ($p in Get-SoundProfiles) {
+            Write-Chime (Join-Path $dir ($p.Id + '.wav')) $p.Freqs $p.Durs
+        }
+    } catch { Write-Log ('Ensure-AllSounds: ' + $_.Exception.Message) }
+}
+
+# WPF MediaPlayer gives real volume control (0..1) which SoundPlayer cannot do.
+# A single persistent player is reused so previews can be stopped/restarted cleanly.
+function Get-NotifyPlayer {
+    if ($null -eq $script:NotifyPlayer -or -not $script:NotifyPlayer.GetType()) {
+        try {
+            $p = New-Object System.Windows.Media.MediaPlayer
+            $p.Volume = [math]::Max(0.0, [math]::Min(1.0, $script:NotifyVolume / 100.0))
+            $script:NotifyPlayer = $p
+        } catch { $script:NotifyPlayer = $null }
+    }
+    return $script:NotifyPlayer
+}
+
+function Play-NotifySound([string]$soundId) {
+    if (-not $script:SoundEnabled) { return }
+    try {
+        $id = [string]$soundId
+        $ids = @(Get-SoundProfiles | ForEach-Object { $_.Id })
+        if ($ids -notcontains $id) { $id = 'chime' }
+        $wav = Join-Path (Join-Path $PSScriptRoot 'sounds') ($id + '.wav')
+        if (-not (Test-Path -LiteralPath $wav)) { Ensure-AllSounds }
+        $p = Get-NotifyPlayer
+        if ($null -eq $p) {
+            if (Test-Path -LiteralPath $wav) { Play-WavFile $wav }
+            else { try { [System.Media.SystemSounds]::Exclamation.Play() } catch {} }
+            return
+        }
+        try { $p.Stop() } catch {}
+        try { $p.Close() } catch {}
+        $script:NotifyPlaying = $true
+        $p.Open([uri]::new($wav))
+        $p.Volume = [math]::Max(0.0, [math]::Min(1.0, $script:NotifyVolume / 100.0))
+        $p.Play()
+    } catch {
         try { [System.Media.SystemSounds]::Exclamation.Play() } catch {}
     }
+}
+
+function Play-TaskSound {
+    Play-NotifySound $script:NotifySound
 }
 
 function Play-SuccessSound {
@@ -852,6 +930,10 @@ function Show-TaskDialog($existing, [string]$initialTitle = '', [string]$initial
                 }
             }
             $t.Title = $titles[$i]
+            # Capture the previous schedule before overwriting, so a real change can be detected.
+            $prevTime = [string]$t.Time
+            $prevRemind = [int]$t.RemindBefore
+            $prevDate = [string]$t.Date
             $t.Time = $timeStr
             $t.Repeat = $repeat
             if ($repeat -eq 'Weekly') { $t.Days = @($selected) }
@@ -860,7 +942,17 @@ function Show-TaskDialog($existing, [string]$initialTitle = '', [string]$initial
                 else { $t.Date = (Get-TodayStr) }
             }
             $t.Notify = [bool]$notifyCheck.IsChecked
+            # If the schedule itself changed (time, reminder lead, or date), the old
+            # "already notified today" memory is no longer valid: without this, an
+            # edited task whose previous time already passed stays marked as notified
+            # and its new time never fires an alert.
+            $scheduleChanged = (
+                ($prevTime -ne [string]$t.Time) -or
+                ($prevRemind -ne [int]$remind) -or
+                ($repeat -eq 'Once' -and $prevDate -ne [string]$t.Date)
+            )
             $t.RemindBefore = $remind
+            if ($scheduleChanged) { Reset-TaskNotificationState $t.Id }
             if ($null -eq $existing -or $i -gt 0) {
                 $script:Tasks += $t
             }
@@ -1540,6 +1632,20 @@ function Initialize-Notified {
     }
     # Return the missed ids so the caller can surface a "missed tasks" toast.
     return @($already)
+}
+
+# Clears the "already notified today" and snooze memory for one task so its
+# notification can fire again when a new schedule (time/date/reminder) arrives.
+# Called when a task's schedule is edited after its original time has passed.
+function Reset-TaskNotificationState([string]$id) {
+    if (-not $id) { return }
+    try {
+        $today = Get-TodayStr
+        if ($script:NotifiedIds.ContainsKey($today)) {
+            $script:NotifiedIds[$today] = @($script:NotifiedIds[$today] | Where-Object { $_ -ne $id })
+        }
+        if ($script:Snoozed.ContainsKey($id)) { $script:Snoozed.Remove($id) }
+    } catch { Write-Log ('Reset-TaskNotificationState: ' + $_.Exception.Message) }
 }
 
 # Reorders a task by moving it one position in the list (drag & drop / keyboard order)
@@ -2486,6 +2592,25 @@ $script:MainXaml = @'
                 <CheckBox x:Name="AutoStartCheck" Content="הפעלה עם ווינדוס" FontSize="12" Foreground="@TEXT2@" Margin="0,4,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
                 <CheckBox x:Name="StartMinCheck" Content="התחל ממוזער למגש" FontSize="12" Foreground="@TEXT2@" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
                 <CheckBox x:Name="FullscreenToastsCheck" Content="הצג הודעות גם במסך מלא" FontSize="12" Foreground="@TEXT2@" Margin="0,6,0,0" HorizontalAlignment="Right" FlowDirection="RightToLeft" HorizontalContentAlignment="Right"/>
+                <TextBlock Text="צליל ההתראה" FontSize="11.5" Margin="0,12,0,4" HorizontalAlignment="Right" FontWeight="SemiBold" Foreground="@MUT@"/>
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <ComboBox x:Name="SoundPickCombo" FontSize="12" FlowDirection="RightToLeft" MinWidth="150" ToolTip="בחירת צליל ההתראה"/>
+                  <Button x:Name="SoundPreviewBtn" Grid.Column="1" Content="&#xE768;" FontFamily="Segoe MDL2 Assets" Width="28" Height="28" FontSize="13" Padding="0" Margin="6,0,0,0" Style="{StaticResource IconBtnStyle}" ToolTip="השמעת תצוגה מקדימה של הצליל"/>
+                </Grid>
+                <Grid Margin="0,8,0,0" FlowDirection="RightToLeft">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="&#xE767;" FontFamily="Segoe MDL2 Assets" FontSize="12" Foreground="@MUT@" VerticalAlignment="Center" ToolTip="עוצמת הצליל"/>
+                  <Slider x:Name="SoundVolumeSlider" Grid.Column="1" Minimum="0" Maximum="100" Value="70" VerticalAlignment="Center" Margin="8,0" ToolTip="עוצמת צליל ההתראה"/>
+                  <TextBlock x:Name="SoundVolumeLabel" Grid.Column="2" Text="70%" FontSize="11" Foreground="@MUT@" VerticalAlignment="Center" MinWidth="32" TextAlignment="Right"/>
+                </Grid>
                 <TextBlock Text="ערכת צבעים" FontSize="11.5" Margin="0,12,0,4" HorizontalAlignment="Right" FontWeight="SemiBold" Foreground="@MUT@"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                   <Button x:Name="ThemeAutoBtn" Content="אוטומטי" Padding="10,5" Margin="0,0,4,0" Style="{StaticResource FilterStyle}" ToolTip="מתעדכן אוטומטית לפי ערכת Windows"/>
@@ -2628,6 +2753,7 @@ function Init-App {
     New-SharedStyles
     Ensure-SoundFile
     Ensure-SuccessSound
+    Ensure-AllSounds
     $script:App = [System.Windows.Application]::New()
     $script:App.ShutdownMode = 'OnExplicitShutdown'
     $script:App.Add_Exit({ Save-Tasks })
@@ -2849,6 +2975,60 @@ function Init-App {
     $script:FullscreenToastsCheck.Add_Click({
         $script:ShowToastsFullscreen = ($script:FullscreenToastsCheck.IsChecked -eq $true)
         Save-Settings
+    })
+
+    # Sound picker (inside the settings popup - its own namescope, like the checkboxes above).
+    $script:SoundPickCombo = $script:SettingsPopup.FindName('SoundPickCombo')
+    $script:SoundPreviewBtn = $script:SettingsPopup.FindName('SoundPreviewBtn')
+    $script:SoundVolumeSlider = $script:SettingsPopup.FindName('SoundVolumeSlider')
+    $script:SoundVolumeLabel = $script:SettingsPopup.FindName('SoundVolumeLabel')
+    foreach ($p in Get-SoundProfiles) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = $p.Name
+        $item.Tag = $p.Id
+        $script:SoundPickCombo.Items.Add($item) > $null
+    }
+    $selIdx = 0
+    for ($i = 0; $i -lt $script:SoundPickCombo.Items.Count; $i++) {
+        if ([string]$script:SoundPickCombo.Items[$i].Tag -eq [string]$script:NotifySound) { $selIdx = $i; break }
+    }
+    $script:SoundPickCombo.SelectedIndex = $selIdx
+    $script:SoundPickCombo.Add_SelectionChanged({
+        try {
+            $item = $script:SoundPickCombo.SelectedItem
+            if ($null -eq $item) { return }
+            $script:NotifySound = [string]$item.Tag
+            Save-Settings
+            Play-NotifySound $script:NotifySound
+        } catch { Write-Log ('SoundPickCombo: ' + $_.Exception.Message) }
+    })
+    # Preview button: first click plays the selected sound, click again while it is
+    # still playing stops it (a toggle, not a replay).
+    $script:SoundPreviewBtn.Add_Click({
+        try {
+            if ($script:NotifyPlaying) {
+                $p = Get-NotifyPlayer
+                if ($null -ne $p) {
+                    try { $p.Stop() } catch {}
+                    try { $p.Close() } catch {}
+                }
+                $script:NotifyPlaying = $false
+                return
+            }
+            Play-NotifySound $script:NotifySound
+        } catch { Write-Log ('SoundPreviewBtn: ' + $_.Exception.Message) }
+    })
+    $script:SoundVolumeSlider.Value = [double]$script:NotifyVolume
+    $script:SoundVolumeLabel.Text = ([string][int]$script:NotifyVolume + '%')
+    $script:SoundVolumeSlider.Add_ValueChanged({
+        try {
+            $v = [int]$script:SoundVolumeSlider.Value
+            $script:NotifyVolume = $v
+            $script:SoundVolumeLabel.Text = ([string]$v + '%')
+            $p = Get-NotifyPlayer
+            if ($null -ne $p) { $p.Volume = [math]::Max(0.0, [math]::Min(1.0, $v / 100.0)) }
+            Save-Settings
+        } catch { Write-Log ('SoundVolumeSlider: ' + $_.Exception.Message) }
     })
     $script:ThemeAutoBtn = $win.FindName('ThemeAutoBtn')
     $script:ThemeLightBtn = $win.FindName('ThemeLightBtn')
