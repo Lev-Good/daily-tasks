@@ -45,6 +45,7 @@ $script:ShowToastsFullscreen = $false
 $script:Filter = 'today'
 $script:ThemeMode = 'auto'
 $script:IsDark = $false
+$script:SampleAdded = $false
 $script:SurfaceCard = '#FFFFFF'
 $script:ThemeTokens = @{}
 $script:ResolvedMainXaml = $null
@@ -66,7 +67,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.7'
+$script:AppVersion = '1.4.8'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -220,6 +221,7 @@ function Load-Settings {
             if ($null -ne $s -and $null -ne $s.Theme) { $script:ThemeMode = [string]$s.Theme }
             if ($null -ne $s -and $null -ne $s.NotifySound) { $script:NotifySound = [string]$s.NotifySound }
             if ($null -ne $s -and $null -ne $s.NotifyVolume) { $script:NotifyVolume = [int]$s.NotifyVolume }
+            if ($null -ne $s -and $null -ne $s.SampleAdded) { $script:SampleAdded = [bool]$s.SampleAdded }
         } catch { Write-Log ('Load-Settings: ' + $_.Exception.Message) }
     }
     # Normalize loaded values against the available sound profiles.
@@ -232,7 +234,7 @@ function Load-Settings {
 
 function Save-Settings {
     try {
-        $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; NotifySound = [string]$script:NotifySound; NotifyVolume = [int]$script:NotifyVolume; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen; Theme = [string]$script:ThemeMode }
+        $s = [pscustomobject]@{ Sound = [bool]$script:SoundEnabled; NotifySound = [string]$script:NotifySound; NotifyVolume = [int]$script:NotifyVolume; StartMinimized = [bool]$script:StartMinimized; ShowToastsFullscreen = [bool]$script:ShowToastsFullscreen; Theme = [string]$script:ThemeMode; SampleAdded = [bool]$script:SampleAdded }
         $json = $s | ConvertTo-Json
         $tmp = $script:SettingsFile + '.tmp'
         [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
@@ -242,6 +244,33 @@ function Save-Settings {
             [System.IO.File]::Move($tmp, $script:SettingsFile)
         }
     } catch { Write-Log ('Save-Settings: ' + $_.Exception.Message) }
+}
+
+# First launch: seed a single sample task so the app opens with something to do.
+# Runs only when the list is empty AND no sample was ever added (flag persisted in
+# settings.json), so it never reappears after the user deletes it or already has tasks.
+function Ensure-FirstRunSample {
+    if ($script:SampleAdded) { return }
+    if ($script:Tasks.Count -gt 0) { return }
+    try {
+        $script:Tasks += [pscustomobject]@{
+            Id = [guid]::NewGuid().ToString()
+            Title = 'הצטרפות לפורום העורכים התורניים'
+            Description = 'https://editorforum.levtov.uk/'
+            Time = (Get-Date).AddMinutes(30).ToString('HH:mm')
+            Repeat = 'Once'
+            Days = @()
+            Date = (Get-TodayStr)
+            Notify = $false
+            Sound = $true
+            RemindBefore = 0
+            Completed = @{}
+        }
+        $script:SampleAdded = $true
+        Save-Tasks
+        Save-Settings
+        Write-Log 'First-run sample task added'
+    } catch { Write-Log ('Ensure-FirstRunSample: ' + $_.Exception.Message) }
 }
 
 function Find-TaskById([string]$id) {
@@ -1223,7 +1252,16 @@ function Build-ToastWindow($data) {
     $closeBtn.Margin = New-Object System.Windows.Thickness(6, 0, 10, 0)
     $closeBtn.Style = $script:IconBtnStyle
     $closeBtn.Tag = 'ToastClose'
-    $closeBtn.Add_Click({ Close-Toast $win })
+    # Resolve the window from the sender at click time (via $this) instead of
+    # capturing the function-local $win: PowerShell delegate closures over
+    # function locals are unreliable and the close silently no-ops. Every other
+    # toast handler uses this same $this/GetWindow pattern.
+    $closeBtn.Add_Click({ $w = [System.Windows.Window]::GetWindow($this); if ($null -ne $w) { Close-Toast $w } })
+    # Defensive safety net: if the X never receives its Click for any reason
+    # (misrouted input on this layered/RTL toast), a click on any area not
+    # consumed by a functional button (done / snooze / task rows mark the event
+    # handled) still dismisses the toast.
+    $wrap.Add_MouseLeftButtonDown({ if (-not $_.Handled) { $w = [System.Windows.Window]::GetWindow($this); if ($null -ne $w) { Close-Toast $w } } })
     [System.Windows.Controls.DockPanel]::SetDock($closeBtn, 'Left')
     $top.Children.Add($closeBtn) > $null
 
@@ -2617,6 +2655,10 @@ $script:MainXaml = @'
                   <Button x:Name="ThemeLightBtn" Content="בהיר" Padding="10,5" Margin="0,0,4,0" Style="{StaticResource FilterStyle}"/>
                   <Button x:Name="ThemeDarkBtn" Content="כהה" Padding="10,5" Style="{StaticResource FilterStyle}"/>
                 </StackPanel>
+                <Border Height="1" Background="@BORDER@" Margin="0,14,0,10"/>
+                <TextBlock HorizontalAlignment="Right" FlowDirection="RightToLeft" FontSize="11" Foreground="@MUT@">
+                  <Run Text="נוצר על ידי "/><Hyperlink x:Name="CreditSiteLink" Foreground="@ACCENT@" Cursor="Hand">לב טוב דיגיטל</Hyperlink>
+                </TextBlock>
               </StackPanel>
             </Border>
           </Popup>
@@ -3038,6 +3080,14 @@ function Init-App {
     $script:ThemeLightBtn.Add_Click({ Set-ThemeMode 'light' })
     $script:ThemeDarkBtn.Add_Click({ Set-ThemeMode 'dark' })
 
+    # Credit footer: clicking the studio name opens the homepage.
+    $creditLink = $script:SettingsPopup.FindName('CreditSiteLink')
+    if ($null -ne $creditLink) {
+        $creditLink.Add_Click({
+            try { Start-Process 'https://digital.levtov.uk/' } catch { Write-Log ('CreditSiteLink: ' + $_.Exception.Message) }
+        })
+    }
+
     $win.Add_Closing({
         param($s, $e)
         if (-not $script:Exiting) {
@@ -3047,6 +3097,7 @@ function Init-App {
     })
 
     Load-Tasks
+    Ensure-FirstRunSample
     $missed = @(Initialize-Notified)
     Refresh-List
 
