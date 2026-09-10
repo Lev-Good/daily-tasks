@@ -1,5 +1,37 @@
 # Agent Log
 
+## 2026-09-10 — v1.4.9: shortcut launch opened the app hidden
+
+### Goal
+Fix: clicking the desktop/Start-menu shortcut (or double-clicking the exe) opened the app hidden in the tray — the window only appeared after clicking the tray icon. Manual launches should always show the window; only the auto-start boot launch should honor "start minimized".
+
+### Root cause
+With `StartMinimized: true` (confirmed in the installed settings.json), every launch skipped `$win.Show()` — including manual launches from a shortcut. There was no way to distinguish a manual launch from the automatic Startup launch.
+
+### Done
+- `Launcher.cs`: when the app is not already running, it now appends `--show` to the script invocation unless `--autostart` was already passed; user-supplied args are forwarded. Version bumped to 1.4.9.
+- `DailyTasks.ps1`: `$script:AutoStart = $args -contains '--autostart'` at top; window shown unless (`AutoStart` AND `StartMinimized`): `if (-not ($script:AutoStart -and $script:StartMinimized)) { $win.Show() }`.
+- `Set-AutoStart` creates the Startup shortcut with `--autostart`; new `Ensure-AutoStartArgs` repairs existing Startup shortcuts created without args (called in `Init-App` after `Load-Settings`).
+- `Show-MainWindow` reordered: restore from Minimized before Show/Activate.
+- Rebuilt `DailyTasks.exe` (csc via build_setup.ps1, only the launcher step used); repo-root exe replaced.
+
+### Files
+- daily-tasks/Launcher.cs
+- daily-tasks/DailyTasks.ps1
+- daily-tasks/DailyTasks.exe (rebuilt)
+- daily-tasks/CHANGELOG.md
+- daily-tasks/docs/AGENT_LOG.md
+
+### Tests
+- PowerShell parser check: clean.
+- Runspace harness mirroring the launcher's exact invocation: `--show` delivered on plain launch, `--autostart` passed as-is — passed. Show-decision matrix (AutoStart × StartMinimized → show/hide) — 4/4 passed.
+- Confirmed the running installed instance holds the `DailyTasksApp_Show` event (launcher's already-running path works); the reported bug is the hidden-start path, fixed via `--show`.
+
+### Status
+Complete (code + docs + build). Local install update + manual verification left to the user (or on request).
+
+---
+
 ## 2026-09-06 — v1.4.7: reschedule notification fix + sound picker
 
 ### Goal

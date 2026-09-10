@@ -33,6 +33,12 @@ if (-not $mutex.WaitOne(0, $false)) {
     exit
 }
 
+# Launch mode: a manual launch (desktop/Start shortcut or double-click) passes
+# --show via the launcher, so the window is always shown even when "start
+# minimized" is enabled. Only the Startup shortcut passes --autostart, which
+# honors that setting on automatic boot launch.
+$script:AutoStart = $args -contains '--autostart'
+
 $script:DataFile = Join-Path $PSScriptRoot 'tasks.json'
 $script:SettingsFile = Join-Path $PSScriptRoot 'settings.json'
 $script:SoundEnabled = $true
@@ -67,7 +73,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.8'
+$script:AppVersion = '1.4.9'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -457,17 +463,34 @@ function Set-AutoStart([bool]$on) {
             $runner = Join-Path $PSScriptRoot 'DailyTasks.exe'
             if (Test-Path -LiteralPath $runner) {
                 $sc.TargetPath = $runner
-                $sc.Arguments = ''
+                $sc.Arguments = '--autostart'
                 $sc.IconLocation = "$runner,0"
             } else {
                 $sc.TargetPath = 'powershell.exe'
-                $sc.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSScriptRoot + '\DailyTasks.ps1"'
+                $sc.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSScriptRoot + '\DailyTasks.ps1" --autostart'
             }
             $sc.WorkingDirectory = $PSScriptRoot
             $sc.Description = 'משימות יומיות'
             $sc.Save()
         } else {
             if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force }
+        }
+    } catch {}
+}
+
+# Older installs created the Startup shortcut without any arguments. Without
+# --autostart the launcher treats every launch as a manual one and would show the
+# window at boot even when "start minimized" is enabled, so repair the shortcut.
+function Ensure-AutoStartArgs {
+    try {
+        $lnk = Get-StartupShortcut
+        if (Test-Path -LiteralPath $lnk) {
+            $ws = New-Object -ComObject WScript.Shell
+            $sc = $ws.CreateShortcut($lnk)
+            if ([string]$sc.Arguments -notmatch '--autostart') {
+                $sc.Arguments = '--autostart'
+                $sc.Save()
+            }
         }
     } catch {}
 }
@@ -2748,9 +2771,9 @@ function New-WinIcon {
 }
 
 function Show-MainWindow {
+    if ($script:Window.WindowState -eq 'Minimized') { $script:Window.WindowState = 'Normal' }
     $script:Window.Show()
     $script:Window.Activate()
-    if ($script:Window.WindowState -eq 'Minimized') { $script:Window.WindowState = 'Normal' }
 }
 
 function New-TrayIcon {
@@ -2791,6 +2814,7 @@ function Exit-App {
 
 function Init-App {
     Load-Settings
+    Ensure-AutoStartArgs
     Apply-Theme
     New-SharedStyles
     Ensure-SoundFile
@@ -3160,7 +3184,10 @@ function Init-App {
         } catch {}
     })
 
-    if (-not $script:StartMinimized) { $win.Show() }
+    # Manual launches (via the launcher's --show, or any start that is not the
+    # Startup shortcut) always show the window; only an automatic boot start with
+    # "start minimized" enabled keeps the window hidden in the tray.
+    if (-not ($script:AutoStart -and $script:StartMinimized)) { $win.Show() }
     if ($missed.Count -gt 0) { Show-MissedToast $missed }
     $script:App.Run()
 }

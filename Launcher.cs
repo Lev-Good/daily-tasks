@@ -4,6 +4,7 @@
 // ever used (which antivirus products flag as a dropper pattern).
 // If the app is already running, signals it to bring its window forward and exits.
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Reflection;
@@ -14,9 +15,9 @@ using System.Management.Automation.Runspaces;
 [assembly: AssemblyProduct("משימות יומיות")]
 [assembly: AssemblyCompany("Lev-Good")]
 [assembly: AssemblyDescription("Daily tasks reminder app for Windows")]
-[assembly: AssemblyVersion("1.4.1.0")]
-[assembly: AssemblyFileVersion("1.4.1.0")]
-[assembly: AssemblyInformationalVersion("1.4.1")]
+[assembly: AssemblyVersion("1.4.9.0")]
+[assembly: AssemblyFileVersion("1.4.9.0")]
+[assembly: AssemblyInformationalVersion("1.4.9")]
 
 class Program
 {
@@ -42,16 +43,30 @@ class Program
         }
         catch { }
 
+        // A desktop/Start-menu shortcut or a double-click means the user wants to
+        // see the window, so pass --show to the script: the window is always shown
+        // on a manual launch even when "start minimized" is enabled. The Startup
+        // shortcut passes --autostart instead, so an automatic boot launch still
+        // honors the user's "start minimized" setting.
+        List<string> scriptArgs = new List<string>();
+        string[] cmd = Environment.GetCommandLineArgs();
+        for (int i = 1; i < cmd.Length; i++) scriptArgs.Add(cmd[i]);
+        if (!scriptArgs.Contains("--show") && !scriptArgs.Contains("--autostart"))
+            scriptArgs.Add("--show");
+
+        object[] payload = new object[] { script, string.Join(" ", scriptArgs.ToArray()) };
         Thread t = new Thread(RunScript);
         t.SetApartmentState(ApartmentState.STA);
-        t.Start(script);
+        t.Start(payload);
         t.Join();
         return 0;
     }
 
     static void RunScript(object state)
     {
-        string script = (string)state;
+        object[] payload = (object[])state;
+        string script = (string)payload[0];
+        string extraArgs = (string)payload[1];
         try
         {
             Runspace runspace = RunspaceFactory.CreateRunspace();
@@ -63,7 +78,7 @@ class Program
                 {
                     ps.Runspace = runspace;
                     ps.AddCommand("Set-Location").AddArgument(Path.GetDirectoryName(script));
-                    ps.AddScript("& '" + script.Replace("'", "''") + "'");
+                    ps.AddScript("& '" + script.Replace("'", "''") + "' " + extraArgs);
                     ps.Invoke();
                 }
             }
