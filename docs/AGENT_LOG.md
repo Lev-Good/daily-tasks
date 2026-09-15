@@ -1,5 +1,42 @@
 # Agent Log
 
+## 2026-09-15 — v1.4.11: the new error reporter immediately found a real crash
+
+### Goal
+The developer installed v1.4.10 on their own machine and got a new error dialog ("You cannot call a method on a null-valued expression"). Diagnose and fix it.
+
+### What the evidence showed
+- `error.log` from the installed copy:
+  `09:10:02 boot v1.4.10 args=[--show] ...` / `09:10:03 boot: window ready` / `09:10:04 Unhandled UI error: You cannot call a method on a null-valued expression.` with the stack running through `System.Windows.Threading.DispatcherTimer.FireTick`.
+- Root cause: the entrance-animation failsafe timer captured a LOCAL variable (`$fs`) inside its tick delegate. PowerShell does not keep a function/handler local alive for a delegate that fires later, so `$fs.Stop()` was called on `$null` 500ms after the window loaded - on **every** launch. Until v1.4.10 the error was discarded by the launcher, which is why nobody ever saw it. Exactly the same class of bug as the toast X button from v1.4.8.
+- The same defect existed in `Launch-Installer` (`$t.Stop()`): the 2-second timer of "install now" threw before `Exit-App`, so the app never quit to let the installer replace its files.
+- A third bug was in the new error dialog itself: `MessageBox.Show(..., 'DefaultDesktopOnly', $opts)` passed a `MessageBoxOptions` value where a `MessageBoxDefaultButton` is expected, so the call threw and silently fell back to an LTR box with the English caption "DailyTasks error" (visible in the screenshot the user sent).
+
+### Done
+- `DailyTasks.ps1`: failsafe timer -> `$script:EntranceTimer`, installer-exit timer -> `$script:InstallExitTimer` (both stopped inside try/catch); `Show-FatalError` rewritten with the correct 6-argument overload, a typed `MessageBoxDefaultButton`, RTL options and a `$lead` parameter; the dispatcher-unhandled handler logs every error and shows the dialog only once per session (`$script:UiErrorShown`) with accurate wording. Version 1.4.11.
+- `Launcher.cs`: the error dialog is now shown only when the window never came up (startup phase); errors logged after the window was ready go to `launcher.log` without nagging on exit. Version 1.4.11.
+- Rebuilt launcher + installer, synced all mirrors.
+
+### Files
+- daily-tasks/DailyTasks.ps1
+- daily-tasks/Launcher.cs
+- daily-tasks/DailyTasks.exe (rebuilt)
+- daily-tasks/DailyTasks-Setup/SFX.cs
+- daily-tasks/CHANGELOG.md, daily-tasks/docs/AGENT_LOG.md
+
+### Tests
+- Parser check: clean.
+- 9/9 end-to-end checks running the app from an isolated payload copy with test-only object names (the user's running instance was never touched): `boot v1.4.11` logged, `boot: window ready`, **no "Unhandled UI error"**, no fatal startup, `sounds/`, `settings.json` and `tasks.json` written, no `.tmp` left behind, instance closed. The crash that reproduced before the fix no longer appears.
+
+### Notes
+- Cold start on this machine takes ~5s from `boot` to `boot: window ready` (13 notification sounds are generated on first run) - not a bug, but the reason a first launch feels slow.
+- The two users who reported "installed but never opens" have not sent a report yet; the BOM/ANSI finding remains the leading hypothesis and the diagnose tool is the way to confirm it.
+
+### Status
+Fixed, released as v1.4.11.
+
+---
+
 ## 2026-09-15 — v1.4.10: "installed fine but the app never opens" (silent-failure hardening)
 
 ### Goal

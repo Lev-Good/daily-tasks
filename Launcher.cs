@@ -26,13 +26,13 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("משימות יומיות")]
 [assembly: System.Reflection.AssemblyCompany("Lev-Good")]
 [assembly: System.Reflection.AssemblyDescription("Daily tasks reminder app for Windows")]
-[assembly: System.Reflection.AssemblyVersion("1.4.10.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.10.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.4.10")]
+[assembly: System.Reflection.AssemblyVersion("1.4.11.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.4.11.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.4.11")]
 
 class Program
 {
-    const string Version = "1.4.10";
+    const string Version = "1.4.11";
     const string MutexName = @"Global\DailyTasksApp_Hebrew";
     const string ShowEventName = @"Global\DailyTasksApp_Show";
     const string AckEventName = @"Global\DailyTasksApp_ShowAck";
@@ -138,11 +138,18 @@ class Program
         // 4) Did the app really come up? If it bailed out instantly and the script
         //    never reported a ready window, the user would see nothing at all.
         bool reachedWindow = ScriptLogSince(logOffset).IndexOf("boot: window ready") >= 0;
+        if (firstError != null && !reachedWindow)
+        {
+            // A failure before the window came up is the case the user must hear about.
+            Log("startup errors - showing them to the user");
+            Fail("משימות יומיות לא הצליחה לעלות:\n\n" + firstError);
+            return 1;
+        }
         if (firstError != null)
         {
-            Log("app reported errors - showing them to the user");
-            Fail("התוכנה נתקלה בשגיאה:\n\n" + firstError);
-            return 1;
+            // Errors during a running session are already in error.log, and the app
+            // shows its own one-time dialog - do not nag the user on exit.
+            Log("errors were logged after the window was ready - no dialog shown");
         }
         if (seconds < 10 && !reachedWindow)
         {

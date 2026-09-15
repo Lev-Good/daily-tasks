@@ -78,9 +78,12 @@ $script:NotifiedIds = @{}
 $script:NotifiedDate = ''
 $script:LastMinute = ''
 $script:Exiting = $false
+$script:EntranceTimer = $null
+$script:InstallExitTimer = $null
+$script:UiErrorShown = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.10'
+$script:AppVersion = '1.4.11'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -168,14 +171,23 @@ function Write-Log([string]$msg) {
     } catch {}
 }
 
-# Last resort when the app cannot start at all: never fail silently. Shows the
-# error (RTL) and points at error.log so the user can report something useful.
-function Show-FatalError([string]$detail) {
+# Last resort when something goes wrong: never fail silently. Shows the error (RTL)
+# and points at error.log so the user can report something useful. The wording of
+# $lead differs between a startup failure and an error during a running session.
+function Show-FatalError([string]$detail, [string]$lead = 'משימות יומיות לא הצליחה לעלות.') {
     $logPath = Join-Path $PSScriptRoot 'error.log'
-    $msg = "משימות יומיות לא הצליחה לעלות.`r`n`r`n$detail`r`n`r`nפרטים מלאים נשמרו בקובץ:`r`n$logPath"
+    $msg = "$lead`r`n`r`n$detail`r`n`r`nפרטים מלאים נשמרו בקובץ:`r`n$logPath"
     try {
         $opts = [System.Windows.Forms.MessageBoxOptions]::RtlReading -bor [System.Windows.Forms.MessageBoxOptions]::RightAlign
-        [System.Windows.Forms.MessageBox]::Show($msg, 'משימות יומיות - שגיאה', 'OK', 'Error', 'DefaultDesktopOnly', $opts) | Out-Null
+        # NOTE: argument 5 is a MessageBoxDefaultButton. Passing a MessageBoxOptions
+        # value there throws, and the dialog silently fell back to an LTR English box.
+        [System.Windows.Forms.MessageBox]::Show(
+            $msg,
+            'משימות יומיות - שגיאה',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error,
+            [System.Windows.Forms.MessageBoxDefaultButton]::Button1,
+            $opts) | Out-Null
     } catch {
         try {
             [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
@@ -2128,13 +2140,15 @@ function Launch-Installer {
     $exe = $script:DownloadTarget
     if (-not (Test-Path -LiteralPath $exe)) { return }
     try { Start-Process -FilePath $exe } catch {}
-    $t = New-Object System.Windows.Threading.DispatcherTimer
-    $t.Interval = [TimeSpan]::FromSeconds(2)
-    $t.Add_Tick({
-        $t.Stop()
+    # Script-scoped on purpose: a local captured by the tick delegate is $null by the
+    # time it fires, which left the app running instead of quitting for the installer.
+    $script:InstallExitTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:InstallExitTimer.Interval = [TimeSpan]::FromSeconds(2)
+    $script:InstallExitTimer.Add_Tick({
+        try { $script:InstallExitTimer.Stop() } catch {}
         Exit-App
     })
-    $t.Start()
+    $script:InstallExitTimer.Start()
 }
 
 function Show-MessageDialog([string]$message, [string]$title, [switch]$Confirm) {
@@ -2861,13 +2875,17 @@ function Init-App {
     $script:App = [System.Windows.Application]::New()
     $script:App.ShutdownMode = 'OnExplicitShutdown'
     $script:App.Add_Exit({ Save-Tasks })
-    # A crash inside the UI must be visible and logged, not a silently vanishing app.
+    # An error inside the UI must be logged, never swallowed - but a cosmetic glitch
+    # should not nag the user on every launch, so the dialog shows once per session.
     $script:App.Add_DispatcherUnhandledException({
         param($s, $e)
         try {
             $d = [string]$e.Exception.Message + "`r`n" + [string]$e.Exception.StackTrace
             Write-Log ('Unhandled UI error: ' + $d)
-            Show-FatalError $d
+            if (-not $script:UiErrorShown) {
+                $script:UiErrorShown = $true
+                Show-FatalError $d 'משימות יומיות נתקלה בשגיאה פנימית. התוכנה ממשיכה לרוץ, אבל אם משהו מתנהג מוזר - שלחו בבקשה את קובץ הלוג.'
+            }
         } catch {}
         $e.Handled = $true
     })
@@ -3232,13 +3250,17 @@ function Init-App {
             $t.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $scx)
             $t.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $scy)
             # Failsafe: never let the window stay invisible if the fade somehow stalls.
-            $fs = New-Object System.Windows.Threading.DispatcherTimer
-            $fs.Interval = [TimeSpan]::FromMilliseconds(500)
-            $fs.Add_Tick({
-                $script:Window.Content.Opacity = 1
-                $fs.Stop()
+            # The timer lives in the script scope on purpose - a local captured by the
+            # tick delegate is $null once the enclosing scope is gone, which made this
+            # timer throw "You cannot call a method on a null-valued expression" on
+            # EVERY launch (silently, until v1.4.10 started reporting it).
+            $script:EntranceTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:EntranceTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+            $script:EntranceTimer.Add_Tick({
+                try { $script:Window.Content.Opacity = 1 } catch {}
+                try { $script:EntranceTimer.Stop() } catch {}
             })
-            $fs.Start()
+            $script:EntranceTimer.Start()
         } catch {}
     })
 
