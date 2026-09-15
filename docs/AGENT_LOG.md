@@ -32,6 +32,10 @@ The developer installed v1.4.10 on their own machine and got a new error dialog 
 - Cold start on this machine takes ~5s from `boot` to `boot: window ready` (13 notification sounds are generated on first run) - not a bug, but the reason a first launch feels slow.
 - The two users who reported "installed but never opens" have not sent a report yet; the BOM/ANSI finding remains the leading hypothesis and the diagnose tool is the way to confirm it.
 
+### Release
+- Commit `b45c83a` on `main` (6 files, 102 insertions), annotated tag `v1.4.11` pushed; `Build and Release` completed successfully and published `DailyTasks-Setup.exe` (380,416 bytes) + `DailyTasks-Setup.zip` (185,146 bytes).
+- Published artifact re-verified: launcher inside is 1.4.11.0, `DailyTasks.ps1` starts with `EF BB BF` and is content-identical to HEAD, `diagnose.cmd` is present.
+
 ### Status
 Fixed, released as v1.4.11.
 
