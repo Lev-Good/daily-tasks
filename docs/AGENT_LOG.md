@@ -44,8 +44,13 @@ Two users reported that the latest installer installs successfully but the app n
 - The dev machine's installed copy came from the downloaded v1.4.9 release (CRLF payload), not from a local `setup.ps1` run - worth remembering when comparing local and released behaviour.
 - The two affected users' machines could not be inspected directly; a `diagnose.txt` report from them is the next diagnostic step.
 
+### Release
+- Commit `c157c82` on `main` (12 files, 744 insertions), annotated tag `v1.4.10` pushed; the `Build and Release` workflow completed successfully and published `DailyTasks-Setup.exe` (378,880 bytes) + `DailyTasks-Setup.zip` (184,417 bytes).
+- Verification of the published artifact: `diagnose.cmd` is included, the launcher inside is 1.4.10.0, and `DailyTasks.ps1` starts with `EF BB BF` (the UTF-8 BOM) and is content-identical to HEAD - i.e. the fix really shipped.
+- Note: the tag was cut before this log entry existed, so the release notes come from the `CHANGELOG.md` section that shipped in `c157c82`.
+
 ### Status
-Code, build and docs complete - not committed yet. Root cause marked as very likely (BOM/ANSI), with the launcher now making any remaining failure visible and self-healing.
+Committed, tagged and released as v1.4.10. Root cause marked as very likely (BOM/ANSI), with the launcher now making any remaining failure visible and self-healing. Waiting on a `diagnose.txt` report from an affected machine (or on the fix simply working for them) to confirm.
 
 ---
 
