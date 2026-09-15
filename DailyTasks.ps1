@@ -1,4 +1,4 @@
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
+﻿Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
 # Enable DPI awareness so the WPF window is crisp on high-DPI displays (must run before any window is created)
 try {
@@ -23,21 +23,28 @@ public static class DailyTasksFullscreen {
 "@ -ErrorAction Stop
 } catch {}
 
-$mutex = New-Object System.Threading.Mutex($false, 'Global\DailyTasksApp_Hebrew')
-if (-not $mutex.WaitOne(0, $false)) {
-    try {
-        $ev = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Global\DailyTasksApp_Show')
-        [void]$ev.Set()
-        $ev.Dispose()
-    } catch {}
-    exit
-}
+# Single instance: the first process owns the mutex; a second launch asks the
+# running instance to show its window and exits. Every step is guarded - if the
+# mutex cannot be created at all (locked-down machine) the app still starts
+# instead of dying silently.
+try {
+    $mutex = New-Object System.Threading.Mutex($false, 'Global\DailyTasksApp_Hebrew')
+    if (-not $mutex.WaitOne(0, $false)) {
+        try {
+            $ev = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Global\DailyTasksApp_Show')
+            [void]$ev.Set()
+            $ev.Dispose()
+        } catch {}
+        exit
+    }
+} catch {}
 
 # Launch mode: a manual launch (desktop/Start shortcut or double-click) passes
 # --show via the launcher, so the window is always shown even when "start
 # minimized" is enabled. Only the Startup shortcut passes --autostart, which
 # honors that setting on automatic boot launch.
 $script:AutoStart = $args -contains '--autostart'
+$script:BootArgs = ($args -join ' ')
 
 $script:DataFile = Join-Path $PSScriptRoot 'tasks.json'
 $script:SettingsFile = Join-Path $PSScriptRoot 'settings.json'
@@ -73,7 +80,7 @@ $script:LastMinute = ''
 $script:Exiting = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.9'
+$script:AppVersion = '1.4.10'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -161,6 +168,22 @@ function Write-Log([string]$msg) {
     } catch {}
 }
 
+# Last resort when the app cannot start at all: never fail silently. Shows the
+# error (RTL) and points at error.log so the user can report something useful.
+function Show-FatalError([string]$detail) {
+    $logPath = Join-Path $PSScriptRoot 'error.log'
+    $msg = "משימות יומיות לא הצליחה לעלות.`r`n`r`n$detail`r`n`r`nפרטים מלאים נשמרו בקובץ:`r`n$logPath"
+    try {
+        $opts = [System.Windows.Forms.MessageBoxOptions]::RtlReading -bor [System.Windows.Forms.MessageBoxOptions]::RightAlign
+        [System.Windows.Forms.MessageBox]::Show($msg, 'משימות יומיות - שגיאה', 'OK', 'Error', 'DefaultDesktopOnly', $opts) | Out-Null
+    } catch {
+        try {
+            [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
+            [System.Windows.Forms.MessageBox]::Show($msg, 'DailyTasks error', 'OK', 'Error') | Out-Null
+        } catch {}
+    }
+}
+
 # Safe time parsing: returns a TimeSpan or $null when the string is invalid (legacy/corrupt data)
 function Get-TimeSpanSafe([string]$s) {
     $ts = [TimeSpan]::Zero
@@ -207,7 +230,16 @@ function Save-Tasks {
         $tmp = $script:DataFile + '.tmp'
         [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
         if (Test-Path -LiteralPath $script:DataFile) {
-            [System.IO.File]::Replace($tmp, $script:DataFile, $null)
+            try {
+                # $null would be coerced to "" for a [string] parameter and File.Replace
+                # then fails with "The path is not of a legal form" (which silently broke
+                # the atomic write on every single save). NullString is a real null.
+                [System.IO.File]::Replace($tmp, $script:DataFile, [System.Management.Automation.Language.NullString]::Value)
+            } catch {
+                # No Replace support / locked target: still land the data, then drop the temp.
+                [System.IO.File]::Copy($tmp, $script:DataFile, $true)
+                [System.IO.File]::Delete($tmp)
+            }
         } else {
             [System.IO.File]::Move($tmp, $script:DataFile)
         }
@@ -2814,6 +2846,12 @@ function Exit-App {
 
 function Init-App {
     Load-Settings
+    Write-Log ("boot v$($script:AppVersion) args=[$($script:BootArgs)] autostart=$($script:AutoStart) startmin=$($script:StartMinimized) ps=$($PSVersionTable.PSVersion)")
+    # Leftover from an old failed atomic write - harmless, but keep the folder clean.
+    try {
+        $stale = $script:DataFile + '.tmp'
+        if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue }
+    } catch {}
     Ensure-AutoStartArgs
     Apply-Theme
     New-SharedStyles
@@ -2823,6 +2861,16 @@ function Init-App {
     $script:App = [System.Windows.Application]::New()
     $script:App.ShutdownMode = 'OnExplicitShutdown'
     $script:App.Add_Exit({ Save-Tasks })
+    # A crash inside the UI must be visible and logged, not a silently vanishing app.
+    $script:App.Add_DispatcherUnhandledException({
+        param($s, $e)
+        try {
+            $d = [string]$e.Exception.Message + "`r`n" + [string]$e.Exception.StackTrace
+            Write-Log ('Unhandled UI error: ' + $d)
+            Show-FatalError $d
+        } catch {}
+        $e.Handled = $true
+    })
 
     $xamlBytes = [System.Text.Encoding]::UTF8.GetBytes($script:ResolvedMainXaml)
     $xamlStream = New-Object System.IO.MemoryStream
@@ -3135,10 +3183,20 @@ function Init-App {
         $showTimer = New-Object System.Windows.Threading.DispatcherTimer
         $showTimer.Interval = [TimeSpan]::FromMilliseconds(400)
         $showTimer.Add_Tick({
-            if ($script:ShowEvent.WaitOne(0)) { Show-MainWindow }
+            if ($script:ShowEvent.WaitOne(0)) {
+                Show-MainWindow
+                # Acknowledge the request so the launcher can tell a live instance
+                # from a stale/hung one (and offer a restart instead of silence).
+                try {
+                    $ack = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Global\DailyTasksApp_ShowAck')
+                    [void]$ack.Set()
+                    $ack.Dispose()
+                } catch {}
+            }
         })
         $showTimer.Start()
     }
+    Write-Log 'boot: window ready'
 
     $win.Icon = New-WinIcon
     if ($null -ne $script:AppIconImg) {
@@ -3192,6 +3250,15 @@ function Init-App {
     $script:App.Run()
 }
 
-New-TrayIcon
-Init-App
+try {
+    New-TrayIcon
+    Init-App
+} catch {
+    # Never exit silently: log the full failure and tell the user in plain Hebrew.
+    $detail = [string]$_.Exception.Message
+    try { if ($_.ScriptStackTrace) { $detail = $detail + "`r`n" + $_.ScriptStackTrace } } catch {}
+    Write-Log ('FATAL startup: ' + $detail)
+    Show-FatalError $detail
+    exit 1
+}
 

@@ -1,5 +1,54 @@
 # Agent Log
 
+## 2026-09-15 — v1.4.10: "installed fine but the app never opens" (silent-failure hardening)
+
+### Goal
+Two users reported that the latest installer installs successfully but the app never opens: no window, nothing in the taskbar, not even from the Start menu, and pausing the antivirus did not help. The reporter could not reproduce it on their own machine.
+
+### Investigation (evidence, not guesses)
+- Downloaded the published v1.4.9 assets from GitHub and extracted the SFX payload: `DailyTasks.ps1` is content-identical to HEAD (only CRLF vs LF), the embedded launcher is 1.4.9.0 and references `System.Management.Automation 3.0.0.0` from the GAC. The artifact that fails on those machines is the same one that works locally, so the variable is their environment.
+- Found three silent-failure paths in the code:
+  1. `Launcher.cs` never inspected `ps.Streams.Error` or `InvocationStateInfo`, so any script failure disappeared without a trace.
+  2. The already-running branch (`Mutex.OpenExisting` -> signal the show event -> `return 0`) is a no-op for the user when the running instance is hung or an older build: no window and no taskbar entry.
+  3. `SFX.cs` skipped locked files with `catch { }`, so installing while the app runs can leave an old `DailyTasks.exe` in place (mixed versions) with no notice at all.
+- Reproduced a real bug from the installed machine's own `error.log`: `Save-Tasks: Exception calling "Replace" ... "The path is not of a legal form."`. `[IO.File]::Replace($tmp, $file, $null)` coerces `$null` to `""` for the [string] backup parameter. Verified with a PS 5.1 probe (fails with `$null`, succeeds with `[NullString]::Value`) - the atomic save had never worked.
+- Most likely root cause of the two users' report, addressed defensively: `DailyTasks.ps1` had **no UTF-8 BOM**. Windows PowerShell 5.1 reads a BOM-less script using the machine's ANSI codepage, so on any machine whose ANSI codepage is not UTF-8 the Hebrew text and the whole XAML heredoc decode to mojibake and window creation fails before anything is visible. This dev machine runs the Windows UTF-8 beta codepage (`[Text.Encoding]::Default.WebName = utf-8`, seen in the diagnose report), which is exactly why the bug cannot be reproduced here.
+
+### Done
+- `DailyTasks.ps1`: UTF-8 BOM added; startup wrapped in try/catch that logs the failure and shows a Hebrew error dialog (`Show-FatalError`); `DispatcherUnhandledException` handler added; boot breadcrumb + leftover `.tmp` cleanup in `Init-App`; mutex creation guarded (the app still starts if single-instance is unavailable); the show-request handler now sets a `Global\DailyTasksApp_ShowAck` event so the launcher can verify a live instance; `Save-Tasks` uses `[NullString]::Value` with a copy+delete fallback. Version 1.4.10.
+- `Launcher.cs`: logs every step to `%LOCALAPPDATA%\DailyTasks\launcher.log`; waits up to 3s for the ACK and, if the running instance does not answer, offers a restart and closes only instances running from its own install folder; checks that Windows PowerShell 5.1 (System.Management.Automation) is available and explains how to install it if not; captures the script error stream and shows the first error; detects an exit within 10s that never logged `boot: window ready` and reports it. Version 1.4.10.
+- `DailyTasks-Setup/SFX.cs`: closes a running copy before copying (only the one running from the install folder), verifies every written file by size with one retry, writes `install.log`, shows an explicit partial-install dialog naming the failed files, and reports a failed launch.
+- New `diagnose.cmd` (ASCII-only batch, CRLF): collects Windows/PowerShell/encoding/engine state, mutex state, file list + SHA256 hashes + Zone.Identifier, shortcuts, settings and log tails into `%LOCALAPPDATA%\DailyTasks\diagnose.txt`. Added to the Release workflow payload lists (both), `build_setup.ps1`, `SFX.cs` and `setup.ps1`; the installer also creates a "בדיקת תקינות" Start-menu shortcut.
+- `README.txt` troubleshooting section, `.gitignore` (`sounds/`, the new build copy), rebuilt `DailyTasks.exe` + `DailyTasks-Setup.exe`.
+
+### Files
+- daily-tasks/Launcher.cs
+- daily-tasks/DailyTasks.ps1
+- daily-tasks/DailyTasks.exe (rebuilt)
+- daily-tasks/DailyTasks-Setup/SFX.cs
+- daily-tasks/DailyTasks-Setup/build_setup.ps1
+- daily-tasks/diagnose.cmd (new)
+- daily-tasks/setup.ps1, daily-tasks/README.txt, daily-tasks/.gitignore
+- daily-tasks/.github/workflows/release.yml
+- daily-tasks/CHANGELOG.md, daily-tasks/docs/AGENT_LOG.md
+
+### Tests
+- PowerShell parser check of the full script: clean.
+- 20 structural checks (temporary harness, run via powershell.exe): BOM present, version, guards present, neutralized copy dot-sourced without starting a GUI, the complete main-window XAML loaded through `XamlReader`, `Save-Tasks` persisted a task with no `Save-Tasks` error logged and no `.tmp` left behind, `diagnose.cmd` present in the installer resources, launcher/installer assembly versions - all passed.
+- 3 launcher behaviour cases using an isolated launcher build with test-only object names (so the running user app was untouched): (1) healthy instance answers with an ACK -> the second launch exits quietly; (2) stale instance that never answers -> detected and the user is offered a restart; (3) script that bails out instantly without reporting a ready window -> detected and reported. All passed.
+- `diagnose.cmd` executed end-to-end on this machine: `diagnose.txt`, 8139 bytes, all sections populated.
+- Note: the first structural run hung because the harness failed to neutralize the startup tail (indentation) and a real WPF window/message loop started; the stray `powershell.exe` was killed by PID and the harness now aborts before dot-sourcing if the tail is not neutralized.
+
+### Issues observed but not addressed
+- The installed app's `error.log` shows repeated `List drop: Exception calling "RemoveAt" ... "Collection was of a fixed size."` from the drag-reorder handler. Not related to this report, still open.
+- The dev machine's installed copy came from the downloaded v1.4.9 release (CRLF payload), not from a local `setup.ps1` run - worth remembering when comparing local and released behaviour.
+- The two affected users' machines could not be inspected directly; a `diagnose.txt` report from them is the next diagnostic step.
+
+### Status
+Code, build and docs complete - not committed yet. Root cause marked as very likely (BOM/ANSI), with the launcher now making any remaining failure visible and self-healing.
+
+---
+
 ## 2026-09-10 — v1.4.9: shortcut launch opened the app hidden
 
 ### Goal

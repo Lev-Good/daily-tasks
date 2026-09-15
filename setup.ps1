@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 
 $dest = Join-Path $env:LOCALAPPDATA 'DailyTasks'
-$files = 'DailyTasks.ps1', 'DailyTasks.cmd', 'DailyTasks.exe', 'DailyTasks.ico', 'sound.wav', 'success.wav', 'uninstall.cmd', 'uninstall.ps1'
+$files = 'DailyTasks.ps1', 'DailyTasks.cmd', 'DailyTasks.exe', 'DailyTasks.ico', 'diagnose.cmd', 'sound.wav', 'success.wav', 'uninstall.cmd', 'uninstall.ps1'
 
 Write-Host 'מתקין את משימות יומיות...'
 

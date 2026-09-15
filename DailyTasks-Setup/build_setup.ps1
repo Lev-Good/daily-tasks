@@ -30,6 +30,7 @@ $files = @(
     'DailyTasks.ps1',
     'DailyTasks.exe',
     'DailyTasks.ico',
+    'diagnose.cmd',
     'install.cmd',
     'uninstall.cmd',
     'uninstall.ps1',
