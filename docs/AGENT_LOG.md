@@ -38,8 +38,13 @@ Two reports from the developer: (1) clicking an empty part of the floating remin
 - The user's app was running during this session and holds `Global\DailyTasksApp_Hebrew`, so the harness used test-only mutex/event names and never touched the live instance; a naive harness run silently loaded nothing (the app's single-instance guard calls `exit`) until the names were rewritten.
 - The stale non-repo copy at the parent folder (`../DailyTasks.ps1`, still v1.4.10) was left untouched - updates are made in the git checkout.
 
+### Release
+- Commit `1f7d811` on `main` (6 files, 88 insertions), annotated tag `v1.4.12` pushed; the `Build and Release` workflow (run 35126223285) completed successfully and published `DailyTasks-Setup.exe` (381,952 bytes) + `DailyTasks-Setup.zip` (185,584 bytes), with the v1.4.12 `CHANGELOG.md` section as the release notes.
+- Published artifact re-verified: the launcher shipped inside `DailyTasks-Setup.zip` is 1.4.12.0, its `DailyTasks.ps1` starts with `EF BB BF` (the UTF-8 BOM), is content-identical to HEAD and carries both fixes (`AppVersion = '1.4.12'`, `TextWrapping = 'Wrap'`, `MinLines`) with no `wrap.Add_MouseLeftButtonDown`; the downloaded `DailyTasks-Setup.exe` embeds the same payload (identical marker counts) - so the fix really reached the downloads, not just the source tree.
+- The `Deploy Landing Page` workflow also ran green on the same push (landing page unchanged).
+
 ### Status
-Fixed in code and documented; runtime click/tap verification in the user's own window (and any release/build) left to the user.
+Released as v1.4.12 for all users. Clicking the real toast and typing in the real dialog in the user's own window remains the only unverified part (I cannot drive the live GUI from here).
 
 ---
 
