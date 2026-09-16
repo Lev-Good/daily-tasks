@@ -1,5 +1,48 @@
 # Agent Log
 
+## 2026-09-16 — v1.4.12: two UI bugs from the reminder toast and the edit dialog
+
+### Goal
+Two reports from the developer: (1) clicking an empty part of the floating reminder toast dismissed the reminder, which should never happen; (2) editing an existing task whose title is longer than the text field cut the text off instead of wrapping it onto more lines inside the field.
+
+### Root cause
+1. **Toast auto-dismiss on a stray click** — v1.4.8 fixed the dead ✕ handler and, as a "safety net" for misrouted input, added `$wrap.Add_MouseLeftButtonDown(...)` which called `Close-Toast` for *any* click the action buttons did not mark as handled. The ✕ handler alone (anchored via `$this` + `Window.GetWindow`) is the reliable close path the v1.4.8 investigation actually proved; the net only ever made the card disappear under a click on its header, its text row or its padding.
+2. **Clipped title while editing** — each row in the task dialog was a horizontal `StackPanel` containing the title `TextBox`. A horizontal StackPanel measures children with unlimited width, and the TextBox had the default `TextWrapping = NoWrap`, so the box asked for the full single-line width of the text (measured: 748.6 px for the 103-character reported title) inside a card capped by `DlgCard MaxWidth="310"`. The card stayed 310 px and the overflow was clipped by the dialog ScrollViewer — exactly the cut-off text in the screenshot.
+
+### Done
+- `DailyTasks.ps1`: removed the toast's card-level `MouseLeftButtonDown` auto-close and left a NOTE explaining why it must not come back; the toast now closes only via ✕, `בוצע ✓` / `דחה` (which close after acting), and the auto-close timer after all rows are marked done. Version 1.4.11 -> 1.4.12.
+- `DailyTasks.ps1`: `Add-DialogRow` now builds the row as a `Grid` (star column for the title + auto column for the remove button), sets `TextWrapping = 'Wrap'`, `AcceptsReturn = $false`, `MinLines = 1` on the title box and aligns the remove button to the top; the row-removal handler walks `$btn.Parent.Parent` instead of the old `$stack` naming. The row's `Children[0]`/`Children[1]` order and the save path's `boxes[0].Text` contract are unchanged, so `Show-TaskDialog` (existing title, hidden remove button, focus, save) needed no edits.
+- `CHANGELOG.md`: v1.4.12 section (Hebrew) documenting both fixes, including that the v1.4.8 click-to-close behaviour was a regression and is gone.
+- The released version is 1.4.12: `Launcher.cs` and `DailyTasks-Setup/SFX.cs` version metadata (assembly/file/informational + the `Version` const) bumped from 1.4.11 to 1.4.12 so the shipped launcher and installer report the same version as the app, the payload mirror `DailyTasks-Setup/` was re-synced from the repo root, and `build_setup.ps1` rebuilt both `DailyTasks-Setup/DailyTasks.exe` and `DailyTasks-Setup/DailyTasks-Setup.exe`; the rebuilt launcher was copied over the tracked repo-root `DailyTasks.exe`.
+
+### Files
+- daily-tasks/DailyTasks.ps1
+- daily-tasks/Launcher.cs, daily-tasks/DailyTasks.exe (rebuilt)
+- daily-tasks/DailyTasks-Setup/SFX.cs
+- daily-tasks/CHANGELOG.md
+- daily-tasks/DailyTasks-Setup/DailyTasks.ps1, Launcher.cs, DailyTasks.exe, DailyTasks-Setup.exe (gitignored payload mirror / build output)
+- daily-tasks/docs/AGENT_LOG.md
+
+### Tests
+- PowerShell parser on the full script: clean (0 errors).
+- Temporary harness that loads the REAL script with only the startup tail neutralized, then calls `Add-DialogRow` itself (the running user instance was kept out of the way by rewriting the two mutex/event names to test-only names; the harness file was deleted afterwards). Results, driven by real WPF `Measure`/`Arrange` on the dialog's actual card width (310 px):
+  - row type `Grid`, 2 children, 2 column definitions; title box `TextWrapping=Wrap`, `AcceptsReturn=False`, `MinLines=1`.
+  - 3-character title -> 242 x 36.6 px; the reported 103-character title -> 242 x 92.5 px (grew onto more lines) inside the same bounded width.
+  - the same text needs 722.6 px on one line; the **old** structure (horizontal StackPanel, no wrapping) asked for 748.6 px inside the 310 px card and was clipped - the reported bug reproduced.
+  - edit-existing-task path (remove button collapsed): box 310 x 73.9 px, i.e. two lines, and the save path still collects the full, untruncated title.
+- Static check of the toast builder: no `$wrap.Add_MouseLeftButtonDown` remains in `Build-ToastWindow`, while the `$closeBtn` click handler is still wired.
+- Not executed: clicking the real toast / typing in the real dialog (I cannot drive the user's live GUI from here) - the layout and wiring evidence above is what the harness could prove.
+- Built installer checked before releasing: `DailyTasks.exe` and `DailyTasks-Setup.exe` both report FileVersion 1.4.12.0 / 1.4.12, and the embedded payload matches the synced copy (same hit counts for `MinLines`, `TextWrapping = 'Wrap'` and `Add-DialogRow`, and no `wrap.Add_MouseLeftButtonDown` anywhere) - i.e. the installer built from these sources embeds the fixed script, not a stale one. The published release artifact is verified separately below.
+
+### Notes
+- The user's app was running during this session and holds `Global\DailyTasksApp_Hebrew`, so the harness used test-only mutex/event names and never touched the live instance; a naive harness run silently loaded nothing (the app's single-instance guard calls `exit`) until the names were rewritten.
+- The stale non-repo copy at the parent folder (`../DailyTasks.ps1`, still v1.4.10) was left untouched - updates are made in the git checkout.
+
+### Status
+Fixed in code and documented; runtime click/tap verification in the user's own window (and any release/build) left to the user.
+
+---
+
 ## 2026-09-15 — v1.4.11: the new error reporter immediately found a real crash
 
 ### Goal

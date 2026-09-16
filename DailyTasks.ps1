@@ -83,7 +83,7 @@ $script:InstallExitTimer = $null
 $script:UiErrorShown = $false
 $script:Tray = $null
 $script:App = $null
-$script:AppVersion = '1.4.11'
+$script:AppVersion = '1.4.12'
 $script:UpdateUrl = 'https://api.github.com/repos/Lev-Good/daily-tasks/releases/latest'
 $script:UpdateJob = $null
 $script:UpdateTimer = $null
@@ -745,15 +745,31 @@ function Add-DialogRow {
     $rowsPanel = $script:dlgRowsPanel
     if ($null -eq $rowsPanel) { return }
     if ($rowsPanel.Children.Count -ge 20) { return }
-    $row = New-Object System.Windows.Controls.StackPanel
-    $row.Orientation = 'Horizontal'
+    # A Grid (star column + auto column) instead of a horizontal StackPanel: a
+    # horizontal StackPanel measures its children with unlimited width, so the
+    # title box asked for the full single-line width of the text and a long title
+    # was clipped at the edge of the dialog instead of wrapping. The star column
+    # gives the box a bounded width, and with TextWrapping='Wrap' the box grows
+    # onto as many lines as the text needs.
+    $row = New-Object System.Windows.Controls.Grid
     $row.Margin = New-Object System.Windows.Thickness(0, 6, 0, 6)
     $row.HorizontalAlignment = 'Stretch'
+    $colTitle = New-Object System.Windows.Controls.ColumnDefinition
+    $colTitle.Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
+    $colRemove = New-Object System.Windows.Controls.ColumnDefinition
+    $colRemove.Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Auto)
+    $row.ColumnDefinitions.Add($colTitle) > $null
+    $row.ColumnDefinitions.Add($colRemove) > $null
 
     $titleBox = New-Object System.Windows.Controls.TextBox
     $titleBox.HorizontalAlignment = 'Stretch'
     $titleBox.FontSize = 14
     $titleBox.Padding = New-Object System.Windows.Thickness(10, 8, 10, 8)
+    # Show the whole title: wrap long text onto extra lines and let the field grow
+    # with it, instead of cutting the text off inside the field.
+    $titleBox.TextWrapping = 'Wrap'
+    $titleBox.AcceptsReturn = $false
+    $titleBox.MinLines = 1
     $titleBox.VerticalContentAlignment = 'Center'
     $titleBox.ToolTip = 'שם המשימה'
 
@@ -762,17 +778,20 @@ function Add-DialogRow {
     $removeBtn.Width = 26
     $removeBtn.Height = 26
     $removeBtn.FontSize = 11
-    $removeBtn.VerticalAlignment = 'Center'
-    $removeBtn.Margin = New-Object System.Windows.Thickness(6, 0, 0, 0)
+    # Aligned with the FIRST line of the (possibly multi-line) title box.
+    $removeBtn.VerticalAlignment = 'Top'
+    $removeBtn.Margin = New-Object System.Windows.Thickness(6, 6, 0, 0)
     $removeBtn.Style = $script:IconBtnStyle
     $removeBtn.Add_Click({
         $btn = $_.Source
-        $stack = $btn.Parent
-        $panel = $stack.Parent
-        $panel.Children.Remove($stack)
+        $row = $btn.Parent
+        $panel = $row.Parent
+        $panel.Children.Remove($row)
     })
 
+    [System.Windows.Controls.Grid]::SetColumn($titleBox, 0)
     $row.Children.Add($titleBox) > $null
+    [System.Windows.Controls.Grid]::SetColumn($removeBtn, 1)
     $row.Children.Add($removeBtn) > $null
     $rowsPanel.Children.Add($row) > $null
 }
@@ -1324,11 +1343,11 @@ function Build-ToastWindow($data) {
     # function locals are unreliable and the close silently no-ops. Every other
     # toast handler uses this same $this/GetWindow pattern.
     $closeBtn.Add_Click({ $w = [System.Windows.Window]::GetWindow($this); if ($null -ne $w) { Close-Toast $w } })
-    # Defensive safety net: if the X never receives its Click for any reason
-    # (misrouted input on this layered/RTL toast), a click on any area not
-    # consumed by a functional button (done / snooze / task rows mark the event
-    # handled) still dismisses the toast.
-    $wrap.Add_MouseLeftButtonDown({ if (-not $_.Handled) { $w = [System.Windows.Window]::GetWindow($this); if ($null -ne $w) { Close-Toast $w } } })
+    # NOTE: the toast is closed ONLY by the ✕ button (and by the action buttons).
+    # A v1.4.8 "safety net" that dismissed the toast on any unhandled
+    # MouseLeftButtonDown on the card was removed in v1.4.12: it made a stray
+    # click on the empty part of the card throw away a reminder the user still
+    # needed, and the ✕ handler above is the anchored, reliable close path.
     [System.Windows.Controls.DockPanel]::SetDock($closeBtn, 'Left')
     $top.Children.Add($closeBtn) > $null
 

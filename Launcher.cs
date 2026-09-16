@@ -26,13 +26,13 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("משימות יומיות")]
 [assembly: System.Reflection.AssemblyCompany("Lev-Good")]
 [assembly: System.Reflection.AssemblyDescription("Daily tasks reminder app for Windows")]
-[assembly: System.Reflection.AssemblyVersion("1.4.11.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.11.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.4.11")]
+[assembly: System.Reflection.AssemblyVersion("1.4.12.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.4.12.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.4.12")]
 
 class Program
 {
-    const string Version = "1.4.11";
+    const string Version = "1.4.12";
     const string MutexName = @"Global\DailyTasksApp_Hebrew";
     const string ShowEventName = @"Global\DailyTasksApp_Show";
     const string AckEventName = @"Global\DailyTasksApp_ShowAck";

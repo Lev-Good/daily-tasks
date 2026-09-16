@@ -24,13 +24,13 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("משימות יומיות")]
 [assembly: AssemblyCompany("Lev-Good")]
 [assembly: AssemblyDescription("Installer for משימות יומיות")]
-[assembly: AssemblyVersion("1.4.11.0")]
-[assembly: AssemblyFileVersion("1.4.11.0")]
-[assembly: AssemblyInformationalVersion("1.4.11")]
+[assembly: AssemblyVersion("1.4.12.0")]
+[assembly: AssemblyFileVersion("1.4.12.0")]
+[assembly: AssemblyInformationalVersion("1.4.12")]
 
 class Program
 {
-    const string Version = "1.4.11";
+    const string Version = "1.4.12";
     const string AppFolderName = "DailyTasks";
     const string AppExeName = "DailyTasks.exe";
 
